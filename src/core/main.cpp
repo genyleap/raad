@@ -21,7 +21,7 @@ int main(int argc, char *argv[])
     QCoreApplication::setOrganizationName(QStringLiteral("Genyleap"));
     QCoreApplication::setApplicationName(QStringLiteral("Raad"));
     QCoreApplication::setApplicationVersion(QStringLiteral(APP_VERSION));
-    QQuickStyle::setStyle("FluentWinUI3");
+    QQuickStyle::setStyle("Basic"); // FluentWinUI3
 
     // Create DownloadManager instance
     DownloadManager manager;
@@ -62,7 +62,7 @@ int main(int argc, char *argv[])
         &app,
         []() { QCoreApplication::exit(-1); },
         Qt::QueuedConnection);
-    engine.loadFromModule("raad", "Main");
+    engine.loadFromModule("Raad", "Main");
 
     if (engine.rootObjects().isEmpty())
         return -1;

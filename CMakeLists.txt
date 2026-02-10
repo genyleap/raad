@@ -382,20 +382,11 @@ set_source_files_properties(${qml_singletons} PROPERTIES QT_QML_SINGLETON_TYPE T
 qt_add_resources(${APP_NAME} RaadAssets
        PREFIX /
        FILES
-       "ui/Resources/fonts/Farhang2-Thin.ttf"
        "ui/Resources/fonts/Farhang2-Regular.ttf"
-       "ui/Resources/fonts/Farhang2-Bold.ttf"
-       "ui/Resources/fonts/Farhang2-Light.ttf"
 
-       "ui/Resources/fonts/Farhang2FaNum-Medium.ttf"
-       "ui/Resources/fonts/IRANSansXFaNum-Bold.ttf"
-       "ui/Resources/fonts/IRANSansXFaNum-Regular.ttf"
-
-       "ui/Resources/fonts/Font Awesome 6 Brands-Regular-400.otf"
-       "ui/Resources/fonts/Font Awesome 6 Pro-Light-300.otf"
-       "ui/Resources/fonts/Font Awesome 6 Pro-Regular-400.otf"
-       "ui/Resources/fonts/Font Awesome 6 Pro-Solid-900.otf"
-       "ui/Resources/fonts/Font Awesome 6 Pro-Thin-100.otf"
+       "ui/Resources/fonts/Font Awesome 7 Brands-Regular-400.otf"
+       "ui/Resources/fonts/Font Awesome 7 Free-Regular-400.otf"
+       "ui/Resources/fonts/Font Awesome 7 Free-Solid-900.otf"
 
        "ui/Resources/image/avatar.svg"
 )
