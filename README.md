@@ -7,13 +7,13 @@
 Raad is a modern, high-performance download manager built with modern **C++20** and **Qt 6**, designed for speed, reliability, and clean architecture — with future integration for **Geny token and blockchain-powered features**.
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
-![C++ Version](https://img.shields.io/badge/C%2B%2B%20Version-20-blue.svg)
+![C++](https://img.shields.io/badge/C%2B%2B%20Version-20-blue.svg)
 ![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)
 
 
 ## 🚧 Project Status
 > Raad is currently **under active development**.  
-> The core download engine is in progress, and the **graphical UI has not been implemented yet**.
+> The core download engine is in progress, and the **graphical UI has not completed yet**.
 
 
 ## Highlights
@@ -74,7 +74,7 @@ If CMake cannot find Qt, set one of the following and reconfigure:
 ## Project Layout
 
 * `src/` — C++ core, download engine, and services
-* `qml/` — QML UI *(work in progress)*
+* `ui/` — QML UI *(work in progress)*
 * `packaging/` — packaging assets and helpers
 
 ## License
