@@ -6,9 +6,8 @@
 
 Raad is a modern, high-performance download manager built with modern **C++20** and **Qt 6**, designed for speed, reliability, and clean architecture — with future integration for **Geny token and blockchain-powered features**.
 
-
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
-![C++ Version](https://img.shields.io/badge/C%2B%2B-C%2B%2B20-blue.svg)
+![C++ Version](https://img.shields.io/badge/C%2B%2B%20Version-20-blue.svg)
 ![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)
 
 
