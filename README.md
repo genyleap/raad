@@ -1,10 +1,18 @@
-# Raad ⚡️
+## Raad ⚡️
+
+<u><small><i>Pronunciation: /rɑːd/ — Persian (رعد)</i></small></u>
 
 **Next-Gen, Ultra-Fast, and Reliable Download Manager**
 
-Raad is a modern, high-performance download manager built with C++20 and Qt 6, designed for speed, reliability, and clean architecture — with future integration for Geny token and blockchain features.
+Raad is a modern, high-performance download manager built with modern **C++20** and **Qt 6**, designed for speed, reliability, and clean architecture — with future integration for **Geny token and blockchain-powered features**.
 
-> 🚧 **Project Status**  
+
+![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
+![C++ Version](https://img.shields.io/badge/C%2B%2B-C%2B%2B20-blue.svg)
+![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)
+
+
+## 🚧 Project Status
 > Raad is currently **under active development**.  
 > The core download engine is in progress, and the **graphical UI has not been implemented yet**.
 
