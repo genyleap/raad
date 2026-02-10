@@ -13,6 +13,7 @@ Raad is a modern, high-performance download manager built with **modern C++ (C++
 - High-performance multi-segment downloads with resume support  
 - File integrity verification (hash-based)  
 - Clean and modular C++20 codebase  
+- Integrated with Geny token & blockchain for future features
 - Designed for a modern QML-based UI *(coming soon)*
 
 
