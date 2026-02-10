@@ -384,9 +384,9 @@ qt_add_resources(${APP_NAME} RaadAssets
        FILES
        "ui/Resources/fonts/Farhang2-Regular.ttf"
 
-       "ui/Resources/fonts/Font Awesome 7 Brands-Regular-400.otf"
-       "ui/Resources/fonts/Font Awesome 7 Free-Regular-400.otf"
-       "ui/Resources/fonts/Font Awesome 7 Free-Solid-900.otf"
+       "ui/Resources/fonts/fa-brands-400.woff2"
+       "ui/Resources/fonts/fa-regular-400.woff2"
+       "ui/Resources/fonts/fa-solid-900.woff2"
 
        "ui/Resources/image/avatar.svg"
 )
