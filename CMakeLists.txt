@@ -295,7 +295,109 @@ find_package(Qt6 REQUIRED COMPONENTS Quick QuickControls2 Network Concurrent)
 qt_standard_project_setup(REQUIRES 6.8)
 
 qt_add_executable(${APP_NAME}
+    WIN32
+    MACOSX_BUNDLE
     src/core/main.cpp
+)
+
+# ---- QML Files ----
+set(qml_core
+        "ui/Core/FontSystem.qml"
+        "ui/Core/AppGlobals.qml"
+        "ui/Core/Colors.qml"
+        "ui/Core/Metrics.qml"
+        "ui/Core/Typography.qml"
+        "ui/Core/Theme.qml"
+        "ui/Core/Animations.qml"
+        "ui/Core/Elevation.qml"
+)
+set(qml_controls
+        "ui/Controls/Avatar.qml"
+        "ui/Controls/Card.qml"
+        "ui/Controls/HorizontalLine.qml"
+        "ui/Controls/HorizontalSpacer.qml"
+        "ui/Controls/VerticalLine.qml"
+        "ui/Controls/VerticalSpacer.qml"
+        "ui/Controls/Text.qml"
+        "ui/Controls/Button.qml"
+        "ui/Controls/ActionButton.qml"
+        "ui/Controls/IconButton.qml"
+        "ui/Controls/MenuButton.qml"
+        "ui/Controls/PillButton.qml"
+        "ui/Controls/Label.qml"
+        "ui/Controls/Text.qml"
+        "ui/Controls/TextField.qml"
+        "ui/Controls/TextArea.qml"
+        "ui/Controls/ComboBox.qml"
+        "ui/Controls/SpinBox.qml"
+        "ui/Controls/ProgressBar.qml"
+        "ui/Controls/LayoutButton.qml"
+        "ui/Controls/Switch.qml"
+        "ui/Controls/MiniButton.qml"
+        "ui/Controls/TabBar.qml"
+        "ui/Controls/ToolTip.qml"
+        "ui/Controls/TabBarButton.qml"
+        "ui/Controls/TabButton.qml"
+        "ui/Controls/TabButtonMini.qml"
+        "ui/Controls/Menu.qml"
+        "ui/Controls/FootMenu.qml"
+        "ui/Controls/FootButton.qml"
+        "ui/Controls/Image.qml"
+        "ui/Controls/DownloadDelegate.qml"
+        "ui/Controls/DownloadListView.qml"
+        "ui/Controls/AddDownloadDialog.qml"
+)
+set(qml_layout
+        "ui/Layout/Footer.qml"
+        "ui/Layout/Header.qml"
+        "ui/Layout/MoreLink.qml"
+        "ui/Layout/Setting.qml"
+)
+
+# set(qml_dashboard)
+
+set(qml_main ui/Main.qml)
+
+set(qml_files
+        ${qml_main}
+        ${qml_core}
+        ${qml_controls}
+        ${qml_layout}
+        # ${qml_dashboard}
+)
+
+# ---- Mark singletons ----
+set(qml_singletons
+        ui/Core/AppGlobals.qml
+        ui/Core/Metrics.qml
+        ui/Core/Typography.qml
+        ui/Core/Theme.qml
+        ui/Core/Animations.qml
+        ui/Core/FontSystem.qml
+        ui/Core/Colors.qml
+)
+
+set_source_files_properties(${qml_singletons} PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
+
+qt_add_resources(${APP_NAME} RaadAssets
+       PREFIX /
+       FILES
+       "ui/Resources/fonts/Farhang2-Thin.ttf"
+       "ui/Resources/fonts/Farhang2-Regular.ttf"
+       "ui/Resources/fonts/Farhang2-Bold.ttf"
+       "ui/Resources/fonts/Farhang2-Light.ttf"
+
+       "ui/Resources/fonts/Farhang2FaNum-Medium.ttf"
+       "ui/Resources/fonts/IRANSansXFaNum-Bold.ttf"
+       "ui/Resources/fonts/IRANSansXFaNum-Regular.ttf"
+
+       "ui/Resources/fonts/Font Awesome 6 Brands-Regular-400.otf"
+       "ui/Resources/fonts/Font Awesome 6 Pro-Light-300.otf"
+       "ui/Resources/fonts/Font Awesome 6 Pro-Regular-400.otf"
+       "ui/Resources/fonts/Font Awesome 6 Pro-Solid-900.otf"
+       "ui/Resources/fonts/Font Awesome 6 Pro-Thin-100.otf"
+
+       "ui/Resources/image/avatar.svg"
 )
 
 set(RAAD_MODULE_IFS
@@ -321,15 +423,30 @@ set(RAAD_IMPL_SOURCES
 )
 
 qt_add_qml_module(${APP_NAME}
-    URI raad
-    QML_FILES
-        qml/Main.qml
-        qml/DownloadListView.qml
-        qml/DownloadDelegate.qml
-        qml/AddDownloadDialog.qml
-    SOURCES
+        URI Raad
+        VERSION 1.0
+        QML_FILES
+        ${qml_files}
+        RESOURCES
+        ui/Core/qmldir
+        ui/Controls/qmldir
+        ui/Layout/qmldir
+        ui/Dashboard/qmldir
+
+        SOURCES
         ${RAAD_IMPL_SOURCES}
 )
+
+#qt_add_qml_module(${APP_NAME}
+#    URI raad
+#    QML_FILES
+#        qml/Main.qml
+#        qml/DownloadListView.qml
+#        qml/DownloadDelegate.qml
+#        qml/AddDownloadDialog.qml
+#    SOURCES
+#        ${RAAD_IMPL_SOURCES}
+#)
 
 target_sources(${APP_NAME}
     PUBLIC
