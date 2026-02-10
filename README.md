@@ -2,7 +2,7 @@
 
 **Next-Gen, Ultra-Fast, and Reliable Download Manager**
 
-Raad is a modern, high-performance download manager built with **modern C++ (C++20)** and **Qt 6**, focusing on speed, reliability, and clean architecture.
+Raad is a modern, high-performance download manager built with C++20 and Qt 6, designed for speed, reliability, and clean architecture — with future integration for Geny token and blockchain features.
 
 > 🚧 **Project Status**  
 > Raad is currently **under active development**.  
