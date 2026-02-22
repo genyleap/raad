@@ -337,9 +337,13 @@ void DownloaderTask::start()
     headReq.setRawHeader("User-Agent", "raad/1.0");
     applyNetworkOptions(headReq);
     if (m_headReply) {
-        m_headReply->abort();
-        m_headReply->deleteLater();
+        QPointer<QNetworkReply> oldHead = m_headReply;
         m_headReply = nullptr;
+        if (oldHead) {
+            QObject::disconnect(oldHead, nullptr, this, nullptr);
+            oldHead->abort();
+            if (oldHead) oldHead->deleteLater();
+        }
     }
 
     QNetworkReply* headReply = m_manager->head(headReq);
@@ -464,9 +468,13 @@ void DownloaderTask::startSingleStream(bool resume)
     req.setRawHeader("User-Agent", "raad/1.0");
 
     if (m_singleReply) {
-        m_singleReply->abort();
-        m_singleReply->deleteLater();
+        QPointer<QNetworkReply> oldReply = m_singleReply;
         m_singleReply = nullptr;
+        if (oldReply) {
+            QObject::disconnect(oldReply, nullptr, this, nullptr);
+            oldReply->abort();
+            if (oldReply) oldReply->deleteLater();
+        }
     }
 
     if (m_singleFile) {
@@ -538,10 +546,12 @@ void DownloaderTask::startSingleStream(bool resume)
         }
         if (!m_resumeSingle) return;
         if (status >= 400) {
-            if (m_singleReply) {
-                m_singleReply->abort();
-                m_singleReply->deleteLater();
-                m_singleReply = nullptr;
+            QPointer<QNetworkReply> activeReply = m_singleReply;
+            m_singleReply = nullptr;
+            if (activeReply) {
+                QObject::disconnect(activeReply, nullptr, this, nullptr);
+                activeReply->abort();
+                if (activeReply) activeReply->deleteLater();
             }
             if (m_singleFile) {
                 m_singleFile->close();
@@ -573,11 +583,12 @@ void DownloaderTask::startSingleStream(bool resume)
         }
     });
 
-    connect(reply, &QNetworkReply::errorOccurred, this, [this, reply](QNetworkReply::NetworkError err) {
+    connect(reply, &QNetworkReply::errorOccurred, this, [this, replyPtr](QNetworkReply::NetworkError err) {
         if (err == QNetworkReply::OperationCanceledError || m_state == State::Paused || m_state == State::Canceled)
             return;
-        qWarning() << "GET error:" << reply->errorString();
-        appendLog(QStringLiteral("GET error: %1").arg(reply->errorString()));
+        if (!replyPtr) return;
+        qWarning() << "GET error:" << replyPtr->errorString();
+        appendLog(QStringLiteral("GET error: %1").arg(replyPtr->errorString()));
     });
 #if QT_CONFIG(ssl)
     connect(reply, &QNetworkReply::sslErrors, this, [](const QList<QSslError>& errors) {
@@ -949,10 +960,13 @@ void DownloaderTask::pause()
 
     for (Segment& s : m_segmentsInfo) {
         if (s.reply) {
-            QObject::disconnect(s.reply, nullptr, this, nullptr);
-            s.reply->abort();
-            s.reply->deleteLater();
+            QPointer<QNetworkReply> segReply = s.reply;
             s.reply = nullptr;
+            if (segReply) {
+                QObject::disconnect(segReply, nullptr, this, nullptr);
+                segReply->abort();
+                if (segReply) segReply->deleteLater();
+            }
         }
         if (s.file) {
             s.file->flush();
@@ -964,17 +978,23 @@ void DownloaderTask::pause()
         s.processing = false;
     }
     if (m_headReply) {
-        QObject::disconnect(m_headReply, nullptr, this, nullptr);
-        m_headReply->abort();
-        m_headReply->deleteLater();
+        QPointer<QNetworkReply> oldHead = m_headReply;
         m_headReply = nullptr;
+        if (oldHead) {
+            QObject::disconnect(oldHead, nullptr, this, nullptr);
+            oldHead->abort();
+            if (oldHead) oldHead->deleteLater();
+        }
     }
     // For single-stream
     if (m_singleReply) {
-        QObject::disconnect(m_singleReply, nullptr, this, nullptr);
-        m_singleReply->abort();
-        m_singleReply->deleteLater();
+        QPointer<QNetworkReply> oldReply = m_singleReply;
         m_singleReply = nullptr;
+        if (oldReply) {
+            QObject::disconnect(oldReply, nullptr, this, nullptr);
+            oldReply->abort();
+            if (oldReply) oldReply->deleteLater();
+        }
     }
     if (m_singleFile) {
         m_singleFile->flush();
@@ -1242,10 +1262,13 @@ void DownloaderTask::cleanup(bool emitFinished)
 {
     for (Segment& s : m_segmentsInfo) {
         if (s.reply) {
-            QObject::disconnect(s.reply, nullptr, this, nullptr);
-            s.reply->abort();
-            s.reply->deleteLater();
+            QPointer<QNetworkReply> segReply = s.reply;
             s.reply = nullptr;
+            if (segReply) {
+                QObject::disconnect(segReply, nullptr, this, nullptr);
+                segReply->abort();
+                if (segReply) segReply->deleteLater();
+            }
         }
         if (s.file) {
             s.file->flush();
@@ -1266,16 +1289,22 @@ void DownloaderTask::cleanup(bool emitFinished)
         m_singleFile = nullptr;
     }
     if (m_singleReply) {
-        QObject::disconnect(m_singleReply, nullptr, this, nullptr);
-        m_singleReply->abort();
-        m_singleReply->deleteLater();
+        QPointer<QNetworkReply> oldReply = m_singleReply;
         m_singleReply = nullptr;
+        if (oldReply) {
+            QObject::disconnect(oldReply, nullptr, this, nullptr);
+            oldReply->abort();
+            if (oldReply) oldReply->deleteLater();
+        }
     }
     if (m_headReply) {
-        QObject::disconnect(m_headReply, nullptr, this, nullptr);
-        m_headReply->abort();
-        m_headReply->deleteLater();
+        QPointer<QNetworkReply> oldHead = m_headReply;
         m_headReply = nullptr;
+        if (oldHead) {
+            QObject::disconnect(oldHead, nullptr, this, nullptr);
+            oldHead->abort();
+            if (oldHead) oldHead->deleteLater();
+        }
     }
 
     m_singleBuffer.clear();

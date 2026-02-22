@@ -33,6 +33,52 @@ import raad.utils.category_utils;
 
 namespace utils = raad::utils;
 
+namespace {
+
+QString defaultDownloadsFolderPath()
+{
+    QString root = utils::normalizeFilePath(
+        QDir(QStandardPaths::writableLocation(QStandardPaths::DownloadLocation))
+            .filePath(QStringLiteral("Raad")));
+    if (root.isEmpty()) {
+        root = utils::normalizeFilePath(QStandardPaths::writableLocation(QStandardPaths::DownloadLocation));
+    }
+    if (!root.isEmpty()) {
+        QDir().mkpath(root);
+    }
+    return root;
+}
+
+int normalizedSegmentCount(int value)
+{
+    constexpr int kAllowedSegments[] = {1, 2, 4, 8, 16, 32};
+
+    int best = kAllowedSegments[0];
+    int bestDiff = qAbs(value - best);
+    for (int candidate : kAllowedSegments) {
+        const int diff = qAbs(value - candidate);
+        if (diff < bestDiff) {
+            bestDiff = diff;
+            best = candidate;
+        }
+    }
+    return best;
+}
+
+int segmentCountFromOptions(const QVariantMap* options)
+{
+    constexpr int kDefaultSegments = 8;
+    if (!options || !options->contains(QStringLiteral("segments"))) {
+        return kDefaultSegments;
+    }
+
+    bool ok = false;
+    const int requested = options->value(QStringLiteral("segments")).toInt(&ok);
+    return ok ? normalizedSegmentCount(requested) : kDefaultSegments;
+}
+
+} // namespace
+
 DownloadManager::DownloadManager(QObject* parent) : QObject(parent) {
     m_saveTimer.setSingleShot(true);
     m_saveTimer.setInterval(400);
@@ -150,7 +196,8 @@ DownloaderTask* DownloadManager::addDownloadInternal(const QString &urlStr,
         QDir().mkpath(QFileInfo(normalizedPath).absolutePath());
     }
 
-    DownloaderTask* task = createTask(url, normalizedPath, resolvedQueue, resolvedCategory, 8);
+    const int segments = segmentCountFromOptions(options);
+    DownloaderTask* task = createTask(url, normalizedPath, resolvedQueue, resolvedCategory, segments);
     if (task && options) {
         applyTaskOptions(task, *options);
     }
@@ -715,6 +762,20 @@ qint64 DownloadManager::taskMaxSpeed(int index) const
     return m_taskMaxSpeed.value(task, 0);
 }
 
+qint64 DownloadManager::taskBytesReceived(int index) const
+{
+    DownloaderTask* task = m_model.taskAt(index);
+    if (!task) return 0;
+    return m_taskReceived.value(task, 0);
+}
+
+qint64 DownloadManager::taskBytesTotal(int index) const
+{
+    DownloaderTask* task = m_model.taskAt(index);
+    if (!task) return 0;
+    return m_taskTotal.value(task, 0);
+}
+
 qint64 DownloadManager::taskCompletedAt(int index) const
 {
     DownloaderTask* task = m_model.taskAt(index);
@@ -774,7 +835,7 @@ void DownloadManager::importList(const QString& path)
     const QByteArray raw = file.readAll();
     file.close();
 
-    const QString fallbackFolder = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    const QString fallbackFolder = defaultDownloadsFolderPath();
     const QJsonDocument doc = QJsonDocument::fromJson(raw);
     if (doc.isArray() || doc.isObject()) {
         QJsonArray items;
@@ -1263,7 +1324,7 @@ QString DownloadManager::resolveDownloadPath(const QString& urlStr, const QStrin
         folder = utils::normalizeFilePath(fallbackFolder);
     }
     if (folder.isEmpty()) {
-        folder = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+        folder = defaultDownloadsFolderPath();
     }
     QDir dir(folder);
     return dir.filePath(fileName);
@@ -1445,7 +1506,7 @@ void DownloadManager::loadSession()
         const QString urlStr = obj.value("url").toString();
         QString filePath = obj.value("filePath").toString();
         if (urlStr.isEmpty() || filePath.isEmpty()) continue;
-        const int segments = obj.value("segments").toInt(8);
+        const int segments = normalizedSegmentCount(obj.value("segments").toInt(8));
         const QString queueName = obj.value("queueName").toString(defaultQueueName());
         const QString category = obj.value("category").toString(utils::detectCategory(filePath));
         const QString state = obj.value("state").toString();

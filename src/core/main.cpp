@@ -51,7 +51,14 @@ int main(int argc, char *argv[])
     // Expose the manager to QML
     engine.rootContext()->setContextProperty("downloadManager", &manager);
     engine.rootContext()->setContextProperty("updateClient", &updateClient);
-    engine.rootContext()->setContextProperty("documentsFolder", QStandardPaths::writableLocation(QStandardPaths::DownloadLocation));
+    QString downloadsRoot = QDir(QStandardPaths::writableLocation(QStandardPaths::DownloadLocation)).filePath(QStringLiteral("Raad"));
+    if (downloadsRoot.isEmpty()) {
+        downloadsRoot = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    }
+    if (!downloadsRoot.isEmpty()) {
+        QDir().mkpath(downloadsRoot);
+    }
+    engine.rootContext()->setContextProperty("documentsFolder", downloadsRoot);
     engine.rootContext()->setContextProperty("faFontPath", fontPath);
 
 

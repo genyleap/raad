@@ -2,6 +2,7 @@ module;
 #include <algorithm>
 #include <QAbstractListModel>
 #include <QByteArray>
+#include <QFileInfo>
 #include <QHash>
 #include <QModelIndex>
 #include <QString>
@@ -155,6 +156,67 @@ void DownloadModel::sortBy(const QString& roleName, bool ascending)
         }
     });
     endResetModel();
+}
+
+int DownloadModel::filteredCount(const QString& queueFilter,
+                                 const QString& statusFilter,
+                                 const QString& categoryFilter,
+                                 const QString& searchText) const
+{
+    const QString queueNeedle = queueFilter.trimmed();
+    const QString statusNeedle = statusFilter.trimmed();
+    const QString categoryNeedle = categoryFilter.trimmed();
+    const QString query = searchText.trimmed().toLower();
+
+    auto statusPasses = [&](const QString& state) {
+        if (statusNeedle.isEmpty() || statusNeedle == QStringLiteral("All")) return true;
+        if (statusNeedle == QStringLiteral("Unfinished")) {
+            return state != QStringLiteral("Done")
+                && state != QStringLiteral("Canceled")
+                && state != QStringLiteral("Error");
+        }
+        if (statusNeedle == QStringLiteral("History")) {
+            return state == QStringLiteral("Done")
+                || state == QStringLiteral("Canceled")
+                || state == QStringLiteral("Error");
+        }
+        if (state.isEmpty()) return true;
+        return state == statusNeedle;
+    };
+
+    int matches = 0;
+    for (const DownloadItem& item : m_downloads) {
+        const QString queueValue = item.queueName;
+        const QString categoryValue = item.category;
+        const QString state = item.task ? item.task->stateString() : QString();
+
+        const bool passQueue = queueNeedle.isEmpty()
+            || queueNeedle == QStringLiteral("All Queues")
+            || queueValue.isEmpty()
+            || queueValue == queueNeedle;
+        if (!passQueue) continue;
+
+        if (!statusPasses(state)) continue;
+
+        const bool passCategory = categoryNeedle.isEmpty()
+            || categoryNeedle == QStringLiteral("All")
+            || categoryValue.isEmpty()
+            || categoryValue == categoryNeedle;
+        if (!passCategory) continue;
+
+        if (!query.isEmpty()) {
+            const QString fullName = item.fileName.toLower();
+            const QString baseName = QFileInfo(item.fileName).fileName().toLower();
+            const QString urlValue = item.task ? item.task->url().toLower() : QString();
+            const bool passSearch = fullName.contains(query)
+                || baseName.contains(query)
+                || (!urlValue.isEmpty() && urlValue.contains(query));
+            if (!passSearch) continue;
+        }
+
+        ++matches;
+    }
+    return matches;
 }
 
 DownloaderTask* DownloadModel::taskAt(int index) const {

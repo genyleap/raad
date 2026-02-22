@@ -4,6 +4,7 @@ module;
 #include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
+#include <QStringList>
 #include <QUrlQuery>
 #include <QtGlobal>
 
@@ -69,6 +70,23 @@ QString filenameFromDisposition(const QString& value)
     return QString();
 }
 
+static QString extractNameCandidate(const QString& value)
+{
+    const QString decoded = decodeQueryValue(value).trimmed();
+    if (decoded.isEmpty()) return QString();
+
+    QString clean = decoded;
+    const int hashIdx = clean.indexOf(QLatin1Char('#'));
+    if (hashIdx >= 0) clean = clean.left(hashIdx);
+    const int queryIdx = clean.indexOf(QLatin1Char('?'));
+    if (queryIdx >= 0) clean = clean.left(queryIdx);
+    while (clean.endsWith(QLatin1Char('/'))) clean.chop(1);
+    if (clean.isEmpty()) return QString();
+
+    const QString base = QFileInfo(clean).fileName();
+    return base.isEmpty() ? clean : base;
+}
+
 QString fileNameFromUrl(const QUrl& url)
 {
     if (!url.isValid()) return QString();
@@ -78,12 +96,26 @@ QString fileNameFromUrl(const QUrl& url)
     if (disp.isEmpty()) disp = query.queryItemValue(QStringLiteral("rscd"));
     if (!disp.isEmpty()) {
         const QString fromDisp = filenameFromDisposition(disp);
-        if (!fromDisp.isEmpty()) return fromDisp;
+        const QString dispName = extractNameCandidate(fromDisp);
+        if (!dispName.isEmpty()) return dispName;
     }
-    const QString filename = query.queryItemValue(QStringLiteral("filename"));
-    if (!filename.isEmpty()) return decodeQueryValue(filename);
+    const QStringList queryNameKeys{
+        QStringLiteral("filename"),
+        QStringLiteral("file"),
+        QStringLiteral("f"),
+        QStringLiteral("name"),
+        QStringLiteral("download"),
+        QStringLiteral("path")
+    };
+    for (const QString& key : queryNameKeys) {
+        const QString value = query.queryItemValue(key);
+        if (value.isEmpty()) continue;
+        const QString inferred = extractNameCandidate(value);
+        if (!inferred.isEmpty()) return inferred;
+    }
 
-    const QString path = url.path();
+    QString path = url.path();
+    while (path.endsWith(QLatin1Char('/'))) path.chop(1);
     const QString base = QFileInfo(path).fileName();
     return base;
 }

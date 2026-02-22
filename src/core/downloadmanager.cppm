@@ -206,6 +206,20 @@ public:
     Q_INVOKABLE qint64 taskMaxSpeed(int index) const;
 
     /**
+     * @brief Get received bytes for a task.
+     * @param index Row index.
+     * @return Received bytes.
+     */
+    Q_INVOKABLE qint64 taskBytesReceived(int index) const;
+
+    /**
+     * @brief Get total bytes for a task.
+     * @param index Row index.
+     * @return Total bytes (0 when unknown).
+     */
+    Q_INVOKABLE qint64 taskBytesTotal(int index) const;
+
+    /**
      * @brief Set per-task max speed limit.
      * @param index Row index.
      * @param bytesPerSecond Limit in bytes/sec.

@@ -169,6 +169,16 @@ public:
     Q_INVOKABLE void sortBy(const QString& roleName, bool ascending);
 
     /**
+     * @brief Count rows matching UI filters.
+     *
+     * Used by QML to render accurate empty states and "showing X of Y" labels.
+     */
+    Q_INVOKABLE int filteredCount(const QString& queueFilter,
+                                  const QString& statusFilter,
+                                  const QString& categoryFilter,
+                                  const QString& searchText) const;
+
+    /**
      * @brief Returns the task associated with a given row.
      */
     DownloaderTask* taskAt(int index) const;

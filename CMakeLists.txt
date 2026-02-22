@@ -340,6 +340,9 @@ set(qml_controls
         "ui/Controls/TabButton.qml"
         "ui/Controls/TabButtonMini.qml"
         "ui/Controls/Menu.qml"
+        "ui/Controls/MenuItem.qml"
+        "ui/Controls/MenuSeparator.qml"
+        "ui/Controls/BlurPopupSurface.qml"
         "ui/Controls/FootMenu.qml"
         "ui/Controls/FootButton.qml"
         "ui/Controls/Image.qml"
@@ -382,7 +385,7 @@ set_source_files_properties(${qml_singletons} PROPERTIES QT_QML_SINGLETON_TYPE T
 qt_add_resources(${APP_NAME} RaadAssets
        PREFIX /
        FILES
-       "ui/Resources/fonts/Farhang2-Regular.ttf"
+       "ui/Resources/fonts/Inter_24pt-Medium.ttf"
 
        "ui/Resources/fonts/fa-brands-400.woff2"
        "ui/Resources/fonts/fa-regular-400.woff2"
@@ -427,17 +430,6 @@ qt_add_qml_module(${APP_NAME}
         SOURCES
         ${RAAD_IMPL_SOURCES}
 )
-
-#qt_add_qml_module(${APP_NAME}
-#    URI raad
-#    QML_FILES
-#        qml/Main.qml
-#        qml/DownloadListView.qml
-#        qml/DownloadDelegate.qml
-#        qml/AddDownloadDialog.qml
-#    SOURCES
-#        ${RAAD_IMPL_SOURCES}
-#)
 
 target_sources(${APP_NAME}
     PUBLIC
