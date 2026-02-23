@@ -1,4 +1,5 @@
 module;
+#include <algorithm>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -24,7 +25,9 @@ DownloaderTask::DownloaderTask(const QUrl& url,
     : QObject(parent),
     m_url(url),
     m_filePath(filePath),
-    m_segments(qMax(1, segments))
+    m_parallelTarget(qBound(1, segments, 32)),
+    m_segments(qBound(1, segments, 32)),
+    m_effectiveSegments(qBound(1, segments, 32))
 {
     m_filePath = utils::normalizeFilePath(m_filePath);
     m_singleTempPath = m_filePath + ".part";
@@ -373,6 +376,7 @@ void DownloaderTask::start()
             headReply->deleteLater();
             m_totalSize = 0;
             m_useRange = true;
+            m_effectiveSegments = 1;
             startSingleStream(hasExistingFile);
             return;
         }
@@ -392,6 +396,7 @@ void DownloaderTask::start()
             qDebug() << "No Content-Length → single stream";
             m_totalSize = 0;
             m_useRange = false;
+            m_effectiveSegments = 1;
             startSingleStream(false);
             return;
         }
@@ -406,19 +411,25 @@ void DownloaderTask::start()
         }
 
         if (!m_useRange || m_segments == 1) {
+            m_effectiveSegments = 1;
             startSingleStream(hasExistingFile);
             return;
         }
 
-        int segCount = m_segments;
+        int segCount = qMax(1, m_segments);
         if (m_totalSize > 0) {
-            if (m_totalSize < 4 * 1024 * 1024) segCount = 1;
-            else if (m_totalSize < 32 * 1024 * 1024) segCount = qMin(2, m_segments);
-            else if (m_totalSize < 128 * 1024 * 1024) segCount = qMin(4, m_segments);
+            segCount = static_cast<int>(qMin<qint64>(segCount, m_totalSize));
         }
+        if (segCount <= 1) {
+            m_effectiveSegments = 1;
+            startSingleStream(hasExistingFile);
+            return;
+        }
+        m_effectiveSegments = segCount;
 
         // Prepare segments
         m_segmentsInfo.clear();
+        m_segmentsInfo.reserve(32);
         qint64 segSize = m_totalSize / segCount;
 
         for (int i = 0; i < segCount; ++i) {
@@ -462,6 +473,8 @@ void DownloaderTask::start()
 
 void DownloaderTask::startSingleStream(bool resume)
 {
+    m_effectiveSegments = 1;
+
     QNetworkRequest req(currentUrl());
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                      QNetworkRequest::NoLessSafeRedirectPolicy);
@@ -619,6 +632,21 @@ void DownloaderTask::startSingleStream(bool resume)
         // ensure buffer fully processed
         if (!m_singleProcessing && m_singleBuffer.size() > 0) processSingleBuffer();
 
+        // Final drain after network close: flush any buffered bytes regardless of throttle.
+        if (m_singleFile && !m_singleBuffer.isEmpty()) {
+            while (!m_singleBuffer.isEmpty()) {
+                const qint64 written = m_singleFile->write(m_singleBuffer.constData(), m_singleBuffer.size());
+                if (written <= 0) {
+                    m_anyError = true;
+                    break;
+                }
+                m_singleBuffer.remove(0, written);
+                m_singleWritten += written;
+            }
+            emit progress(totalDownloaded(), m_totalSize);
+            updateSpeedAndETA();
+        }
+
         if (m_singleFile) {
             m_singleFile->close();
             m_singleFile->deleteLater();
@@ -765,6 +793,7 @@ void DownloaderTask::startSegment(Segment* segment)
             appendLog(QStringLiteral("Range ignored; switched to single stream"));
             QTimer::singleShot(0, this, [this] {
                 if (m_state != State::Downloading) return;
+                m_effectiveSegments = 1;
                 cleanup(false);
                 startSingleStream(false);
             });
@@ -809,6 +838,21 @@ void DownloaderTask::startSegment(Segment* segment)
         }
         // ensure buffer fully processed later
         if (!segment->processing && segment->buffer.size() > 0) processSegmentBuffer(segment);
+
+        // Final drain after network close: flush any buffered bytes regardless of throttle.
+        if (segment->file && !segment->buffer.isEmpty()) {
+            while (!segment->buffer.isEmpty()) {
+                const qint64 written = segment->file->write(segment->buffer.constData(), segment->buffer.size());
+                if (written <= 0) {
+                    m_anyError = true;
+                    break;
+                }
+                segment->buffer.remove(0, written);
+                segment->downloaded += written;
+            }
+            emit progress(totalDownloaded(), m_totalSize);
+            updateSpeedAndETA();
+        }
 
         if (segment->file) {
             segment->file->close();
@@ -868,16 +912,124 @@ void DownloaderTask::processSegmentBuffer(Segment* s)
     updateSpeedAndETA();
 
     s->processing = false;
-
-    if (!s->buffer.isEmpty()) {
+    const bool hasPending = !s->buffer.isEmpty();
+    if (hasPending) {
         QTimer::singleShot(10, this, [this, s]{ processSegmentBuffer(s); });
     }
+
+    // Re-run dynamic balancing once buffered bytes are committed.
+    rebalanceSegments();
+}
+
+void DownloaderTask::rebalanceSegments()
+{
+    if (m_state != State::Downloading) return;
+    if (!m_useRange || !m_serverSupportsRange) return;
+    if (m_anyError) return;
+    if (m_segmentsInfo.size() < 2) return;
+
+    constexpr int kMaxSegments = 32;
+    const int desiredConnections = qBound(1, m_parallelTarget, kMaxSegments);
+
+    int activeConnections = 0;
+    for (const Segment& s : m_segmentsInfo) {
+        if (s.reply) {
+            ++activeConnections;
+        }
+    }
+    int freeSlots = desiredConnections - activeConnections;
+    if (freeSlots <= 0) return;
+
+    while (freeSlots > 0) {
+        if (!splitLargestRemainingSegment()) break;
+        --freeSlots;
+    }
+}
+
+bool DownloaderTask::splitLargestRemainingSegment()
+{
+    constexpr qint64 kMinChunkBytes = 256 * 1024;
+    constexpr int kMaxSegments = 32;
+    if (m_segmentsInfo.size() >= kMaxSegments) return false;
+
+    int donorIndex = -1;
+    qint64 donorRemaining = 0;
+    for (int i = 0; i < m_segmentsInfo.size(); ++i) {
+        const Segment& s = m_segmentsInfo.at(i);
+        if (!s.reply) continue;
+        if (s.processing || !s.buffer.isEmpty()) continue;
+
+        const qint64 total = qMax<qint64>(0, s.end - s.start + 1);
+        const qint64 remaining = qMax<qint64>(0, total - s.downloaded);
+        if (remaining < (kMinChunkBytes * 2)) continue;
+        if (remaining > donorRemaining) {
+            donorRemaining = remaining;
+            donorIndex = i;
+        }
+    }
+
+    if (donorIndex < 0) return false;
+
+    Segment& donor = m_segmentsInfo[donorIndex];
+    const qint64 nextOffset = donor.start + donor.downloaded;
+    const qint64 oldEnd = donor.end;
+    const qint64 remaining = oldEnd - nextOffset + 1;
+    if (remaining < (kMinChunkBytes * 2)) return false;
+
+    const qint64 firstHalf = remaining / 2;
+    const qint64 donorNewEnd = nextOffset + firstHalf - 1;
+    const qint64 splitStart = donorNewEnd + 1;
+    if (splitStart > oldEnd || donorNewEnd < nextOffset) return false;
+
+    if (donor.reply) {
+        QPointer<QNetworkReply> donorReply = donor.reply;
+        donor.reply = nullptr;
+        if (donorReply) {
+            QObject::disconnect(donorReply, nullptr, this, nullptr);
+            donorReply->abort();
+            if (donorReply) donorReply->deleteLater();
+        }
+    }
+    if (donor.file) {
+        donor.file->flush();
+        donor.file->close();
+        donor.file->deleteLater();
+        donor.file = nullptr;
+    }
+    donor.end = donorNewEnd;
+
+    Segment splitSegment;
+    splitSegment.start = splitStart;
+    splitSegment.end = oldEnd;
+    splitSegment.downloaded = 0;
+    splitSegment.processing = false;
+    splitSegment.reply = nullptr;
+    splitSegment.file = nullptr;
+    splitSegment.buffer.clear();
+    splitSegment.tempFilePath = QString("%1.part%2").arg(m_filePath).arg(m_segmentsInfo.size());
+    QFile::remove(splitSegment.tempFilePath);
+
+    m_segmentsInfo.push_back(splitSegment);
+    m_effectiveSegments = m_segmentsInfo.size();
+    m_segments = qMin(kMaxSegments, qMax(m_segments, m_effectiveSegments));
+
+    appendLog(QStringLiteral("Dynamic split [%1-%2] + [%3-%4]")
+                  .arg(donor.start)
+                  .arg(donor.end)
+                  .arg(splitSegment.start)
+                  .arg(splitSegment.end));
+
+    startSegment(&m_segmentsInfo[donorIndex]);
+    startSegment(&m_segmentsInfo.last());
+    return true;
 }
 
 void DownloaderTask::onSegmentFinished()
 {
     if (m_state != State::Downloading)
         return;
+
+    rebalanceSegments();
 
     for (const Segment& s : m_segmentsInfo) {
         if (s.downloaded < (s.end - s.start + 1))
@@ -910,8 +1062,18 @@ bool DownloaderTask::mergeSegments()
     if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate))
         return false;
 
+    QVector<const Segment*> ordered;
+    ordered.reserve(m_segmentsInfo.size());
     for (const Segment& s : m_segmentsInfo) {
-        QFile part(s.tempFilePath);
+        ordered.push_back(&s);
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const Segment* a, const Segment* b) {
+        return a->start < b->start;
+    });
+
+    for (const Segment* seg : ordered) {
+        if (!seg) continue;
+        QFile part(seg->tempFilePath);
         if (!part.open(QIODevice::ReadOnly)) {
             out.close();
             return false;
@@ -1242,6 +1404,74 @@ qint64 DownloaderTask::totalDownloaded() const
     for (const Segment& s : m_segmentsInfo) total += s.downloaded;
     total += m_singleWritten;
     return total;
+}
+
+qint64 DownloaderTask::segmentTotal(int index) const
+{
+    if (index < 0) return 0;
+
+    if (!m_segmentsInfo.isEmpty()) {
+        if (index >= m_segmentsInfo.size()) return 0;
+        const Segment& s = m_segmentsInfo.at(index);
+        return qMax<qint64>(0, s.end - s.start + 1);
+    }
+
+    if (m_effectiveSegments <= 1 && index == 0) {
+        return qMax<qint64>(0, m_totalSize);
+    }
+    return 0;
+}
+
+qint64 DownloaderTask::segmentDownloaded(int index) const
+{
+    if (index < 0) return 0;
+
+    if (!m_segmentsInfo.isEmpty()) {
+        if (index >= m_segmentsInfo.size()) return 0;
+        const qint64 total = segmentTotal(index);
+        return qMax<qint64>(0, qMin(total, m_segmentsInfo.at(index).downloaded));
+    }
+
+    if (m_effectiveSegments <= 1 && index == 0) {
+        const qint64 total = segmentTotal(index);
+        return qMax<qint64>(0, qMin(total > 0 ? total : totalDownloaded(), totalDownloaded()));
+    }
+    return 0;
+}
+
+bool DownloaderTask::segmentActive(int index) const
+{
+    if (index < 0 || m_state != State::Downloading) return false;
+
+    if (!m_segmentsInfo.isEmpty()) {
+        if (index >= m_segmentsInfo.size()) return false;
+        const Segment& s = m_segmentsInfo.at(index);
+        return s.reply || s.processing || !s.buffer.isEmpty();
+    }
+
+    if (m_effectiveSegments <= 1 && index == 0) {
+        return m_singleReply || m_singleProcessing || !m_singleBuffer.isEmpty();
+    }
+    return false;
+}
+
+QString DownloaderTask::segmentState(int index) const
+{
+    if (index < 0) return QStringLiteral("Waiting");
+    if (m_state == State::Canceled) return QStringLiteral("Canceled");
+    if (m_anyError && m_state == State::Finished) return QStringLiteral("Error");
+
+    const qint64 total = segmentTotal(index);
+    const qint64 downloaded = segmentDownloaded(index);
+    if (total > 0 && downloaded >= total) return QStringLiteral("Complete");
+
+    if (m_state == State::Paused) {
+        return downloaded > 0 ? QStringLiteral("Paused") : QStringLiteral("Waiting");
+    }
+    if (m_state == State::Idle) return QStringLiteral("Queued");
+    if (m_state == State::Finished) return QStringLiteral("Complete");
+    if (segmentActive(index)) return QStringLiteral("Receiving Data");
+    return QStringLiteral("Waiting");
 }
 
 QString DownloaderTask::stateString() const

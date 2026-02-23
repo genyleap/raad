@@ -104,6 +104,15 @@ RAAD_MODULE_EXPORT class DownloadManager : public QObject {
     //!< @brief Current system power state (battery vs AC).
     Q_PROPERTY(bool onBattery READ onBattery NOTIFY powerStateChanged)
 
+    //!< @brief Whether a network test probe is currently running.
+    Q_PROPERTY(bool networkTestRunning READ networkTestRunning NOTIFY networkTestStateChanged)
+
+    //!< @brief Last network test status message.
+    Q_PROPERTY(QString networkTestMessage READ networkTestMessage NOTIFY networkTestStateChanged)
+
+    //!< @brief Last network test status kind (info/success/warning/danger).
+    Q_PROPERTY(QString networkTestKind READ networkTestKind NOTIFY networkTestStateChanged)
+
 public:
     /**
      * @brief Construct a new download manager.
@@ -574,6 +583,15 @@ public:
     //!< @brief Return current power state.
     bool onBattery() const { return m_onBattery; }
 
+    //!< @brief Return whether a network test is running.
+    bool networkTestRunning() const { return m_networkTestRunning; }
+
+    //!< @brief Return the current network test message.
+    QString networkTestMessage() const { return m_networkTestMessage; }
+
+    //!< @brief Return the current network test message kind.
+    QString networkTestKind() const { return m_networkTestKind; }
+
 
 signals:
     //!< @brief Emitted when max concurrent changes.
@@ -605,6 +623,9 @@ signals:
 
     //!< @brief Emitted when power state changes.
     void powerStateChanged();
+
+    //!< @brief Emitted when network test status or running state changes.
+    void networkTestStateChanged();
 
 
 private slots:
@@ -785,6 +806,14 @@ private:
      */
     void revealPath(const QString& path) const;
 
+    /**
+     * @brief Update network tester status state.
+     * @param running Whether a test is in progress.
+     * @param message Status text.
+     * @param kind Status kind.
+     */
+    void setNetworkTestState(bool running, const QString& message, const QString& kind);
+
 
     DownloadModel m_model;                                                          //!< Backing list model.
     int m_maxConcurrent = 3;                                                        //!< Global max concurrent downloads.
@@ -823,6 +852,9 @@ private:
     bool m_bulkCancelInProgress = false;                                            //!< Bulk cancel guard.
     int m_autoRetryMax = 2;                                                         //!< Default retry attempts.
     int m_autoRetryDelaySec = 5;                                                    //!< Default retry delay in seconds.
+    bool m_networkTestRunning = false;                                              //!< Network tester in-flight state.
+    QString m_networkTestMessage;                                                   //!< Last network tester message.
+    QString m_networkTestKind = QStringLiteral("muted");                            //!< Last network tester kind.
 
     QString m_sessionPath;                                                          //!< Session persistence path.
     PowerMonitor m_powerMonitor;                                                    //!< Power state helper.

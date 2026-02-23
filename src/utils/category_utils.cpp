@@ -15,6 +15,7 @@ QString detectCategory(const QString& filePath)
     const QStringList video = { "mp4", "mkv", "mov", "avi", "webm" };
     const QStringList audio = { "mp3", "wav", "aac", "flac", "m4a", "ogg" };
     const QStringList images = { "jpg", "jpeg", "png", "gif", "bmp", "webp" };
+    const QStringList nft = { "glb", "gltf", "obj", "fbx", "usd", "usda", "usdc", "usdz" };
     const QStringList archives = { "zip", "rar", "7z", "tar", "gz", "bz2" };
     const QStringList documents = { "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md" };
     const QStringList programs = { "dmg", "exe", "msi", "pkg", "app" };
@@ -22,6 +23,7 @@ QString detectCategory(const QString& filePath)
     if (video.contains(ext)) return "Video";
     if (audio.contains(ext)) return "Audio";
     if (images.contains(ext)) return "Images";
+    if (nft.contains(ext)) return "NFT";
     if (archives.contains(ext)) return "Archives";
     if (documents.contains(ext)) return "Documents";
     if (programs.contains(ext)) return "Programs";
@@ -30,7 +32,7 @@ QString detectCategory(const QString& filePath)
 
 QStringList categoryNames()
 {
-    return { "Auto", "Video", "Audio", "Images", "Archives", "Documents", "Programs", "Other" };
+    return { "Auto", "Video", "Audio", "Images", "NFT", "Archives", "Documents", "Programs", "Other" };
 }
 
 } // namespace raad::utils

@@ -107,6 +107,26 @@ DownloadManager::DownloadManager(QObject* parent) : QObject(parent) {
     updatePowerState();
 }
 
+void DownloadManager::setNetworkTestState(bool running, const QString& message, const QString& kind)
+{
+    bool changed = false;
+    if (m_networkTestRunning != running) {
+        m_networkTestRunning = running;
+        changed = true;
+    }
+    if (m_networkTestMessage != message) {
+        m_networkTestMessage = message;
+        changed = true;
+    }
+    if (m_networkTestKind != kind) {
+        m_networkTestKind = kind;
+        changed = true;
+    }
+    if (changed) {
+        emit networkTestStateChanged();
+    }
+}
+
 void DownloadManager::addDownload(const QString &urlStr, const QString &filePath) {
     addDownloadAdvancedWithOptions(urlStr, filePath, defaultQueueName(), QString(), false);
 }
@@ -947,38 +967,108 @@ void DownloadManager::verifyTask(int index)
 
 void DownloadManager::testUrl(const QString& urlStr)
 {
-    QUrl url(urlStr);
-    if (!url.isValid()) {
+    const QString trimmed = urlStr.trimmed();
+    if (trimmed.isEmpty()) {
+        setNetworkTestState(false, QStringLiteral("Enter a URL to test."), QStringLiteral("warning"));
+        emit toastRequested(QStringLiteral("Enter a URL to test"), QStringLiteral("warning"));
+        return;
+    }
+
+    if (m_networkTestRunning) {
+        emit toastRequested(QStringLiteral("Network test already running"), QStringLiteral("warning"));
+        return;
+    }
+
+    QUrl url = QUrl::fromUserInput(trimmed);
+    if (!url.isValid() || (url.scheme() != QStringLiteral("http") && url.scheme() != QStringLiteral("https"))) {
+        setNetworkTestState(false, QStringLiteral("Invalid URL"), QStringLiteral("danger"));
         emit toastRequested(QStringLiteral("Invalid URL"), QStringLiteral("danger"));
         return;
     }
 
-    QNetworkAccessManager* net = new QNetworkAccessManager(this);
-    QNetworkRequest req(url);
-    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-    req.setRawHeader("User-Agent", "raad/1.0");
-    QNetworkReply* reply = net->head(req);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, net]() {
-        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        const QString err = reply->errorString();
-        const QNetworkReply::NetworkError errCode = reply->error();
-        const QVariant len = reply->header(QNetworkRequest::ContentLengthHeader);
-        const QByteArray acceptRanges = reply->rawHeader("Accept-Ranges");
-        reply->deleteLater();
-        net->deleteLater();
+    const qint64 startedMs = QDateTime::currentMSecsSinceEpoch();
+    const QString hostLabel = url.host().isEmpty() ? url.toString(QUrl::RemovePath) : url.host();
+    setNetworkTestState(true, QStringLiteral("Testing %1 ...").arg(hostLabel), QStringLiteral("info"));
 
-        if (status <= 0 || errCode != QNetworkReply::NoError) {
-            emit toastRequested(QStringLiteral("Test failed: %1").arg(err), QStringLiteral("danger"));
+    QNetworkAccessManager* net = new QNetworkAccessManager(this);
+    auto finishResult = [this, net](bool success, const QString& message, const QString& kind) {
+        const QString resolvedKind = success ? kind : QStringLiteral("danger");
+        setNetworkTestState(false, message, resolvedKind);
+        emit toastRequested(message, resolvedKind);
+        net->deleteLater();
+    };
+
+    QNetworkRequest headReq(url);
+    headReq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    headReq.setRawHeader("User-Agent", "raad/1.0");
+    QNetworkReply* headReply = net->head(headReq);
+
+    connect(headReply, &QNetworkReply::finished, this, [this, headReply, url, startedMs, finishResult, net]() mutable {
+        const int status = headReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QNetworkReply::NetworkError errCode = headReply->error();
+        const QString errText = headReply->errorString();
+        const QVariant len = headReply->header(QNetworkRequest::ContentLengthHeader);
+        const QByteArray acceptRanges = headReply->rawHeader("Accept-Ranges");
+        headReply->deleteLater();
+
+        const qint64 elapsedMs = qMax<qint64>(1, QDateTime::currentMSecsSinceEpoch() - startedMs);
+        const bool headSucceeded = (errCode == QNetworkReply::NoError) && (status >= 200 && status < 400);
+        if (headSucceeded) {
+            QString message = QStringLiteral("HEAD %1").arg(status);
+            if (len.isValid() && len.toLongLong() > 0) {
+                message += QStringLiteral(" • Size %1 B").arg(len.toLongLong());
+            }
+            if (!acceptRanges.isEmpty()) {
+                message += QStringLiteral(" • Ranges %1").arg(QString::fromUtf8(acceptRanges));
+            }
+            message += QStringLiteral(" • %1 ms").arg(elapsedMs);
+            finishResult(true, message, QStringLiteral("success"));
             return;
         }
-        QString msg = QStringLiteral("HTTP %1").arg(status);
-        if (len.isValid() && len.toLongLong() > 0) {
-            msg += QStringLiteral(" • Size %1").arg(len.toLongLong());
+
+        const bool shouldFallbackGet = (status == 0 || status == 403 || status == 405 || status == 429 || status == 500 || status == 501)
+                                       || (errCode != QNetworkReply::NoError);
+        if (!shouldFallbackGet) {
+            finishResult(false, QStringLiteral("Test failed: HTTP %1 • %2").arg(status).arg(errText), QStringLiteral("danger"));
+            return;
         }
-        if (!acceptRanges.isEmpty()) {
-            msg += QStringLiteral(" • Ranges %1").arg(QString::fromUtf8(acceptRanges));
-        }
-        emit toastRequested(msg, QStringLiteral("info"));
+
+        QNetworkRequest getReq(url);
+        getReq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        getReq.setRawHeader("User-Agent", "raad/1.0");
+        getReq.setRawHeader("Range", "bytes=0-262143");
+        QNetworkReply* getReply = net->get(getReq);
+        qint64* probeBytes = new qint64(0);
+
+        connect(getReply, &QNetworkReply::readyRead, this, [getReply, probeBytes]() {
+            if (!getReply) return;
+            *probeBytes += getReply->readAll().size();
+        });
+
+        connect(getReply, &QNetworkReply::finished, this, [getReply, probeBytes, startedMs, finishResult]() mutable {
+            const int statusGet = getReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            const QNetworkReply::NetworkError getErrCode = getReply->error();
+            const QString getErr = getReply->errorString();
+            if (getReply) {
+                *probeBytes += getReply->readAll().size();
+                getReply->deleteLater();
+            }
+
+            if (getErrCode != QNetworkReply::NoError || (statusGet <= 0 || statusGet >= 500)) {
+                finishResult(false, QStringLiteral("Test failed: HTTP %1 • %2").arg(statusGet).arg(getErr), QStringLiteral("danger"));
+                delete probeBytes;
+                return;
+            }
+
+            const qint64 elapsedGetMs = qMax<qint64>(1, QDateTime::currentMSecsSinceEpoch() - startedMs);
+            const qint64 bytesPerSec = (*probeBytes * 1000) / elapsedGetMs;
+            QString message = QStringLiteral("Probe %1 • %2 KB/s • %3 ms")
+                                  .arg(statusGet)
+                                  .arg(qMax<qint64>(0, bytesPerSec / 1024))
+                                  .arg(elapsedGetMs);
+            finishResult(true, message, QStringLiteral("success"));
+            delete probeBytes;
+        });
     });
 }
 

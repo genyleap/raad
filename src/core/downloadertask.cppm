@@ -213,8 +213,23 @@ public:
     //!< @brief Return the task URL string.
     Q_INVOKABLE QString url() const { return m_url.toString(); }
 
-    //!< @brief Return the segment count.
+    //!< @brief Return the configured segment count.
     Q_INVOKABLE int segments() const { return m_segments; }
+
+    //!< @brief Return currently active segment count used by runtime.
+    Q_INVOKABLE int effectiveSegments() const { return m_effectiveSegments > 0 ? m_effectiveSegments : qMax(1, m_segments); }
+
+    //!< @brief Return downloaded bytes for one segment.
+    Q_INVOKABLE qint64 segmentDownloaded(int index) const;
+
+    //!< @brief Return total bytes for one segment.
+    Q_INVOKABLE qint64 segmentTotal(int index) const;
+
+    //!< @brief Return whether a segment is actively receiving/processing.
+    Q_INVOKABLE bool segmentActive(int index) const;
+
+    //!< @brief Return human-readable state for one segment.
+    Q_INVOKABLE QString segmentState(int index) const;
 
     /**
      * @brief Set max speed limit.
@@ -636,7 +651,9 @@ private:
 
     QUrl m_url;                                     //!< Source URL.
     QString m_filePath;                             //!< Target file path.
-    int m_segments = 1;                             //!< Requested segment count.
+    int m_parallelTarget = 1;                       //!< Target parallel connections.
+    int m_segments = 1;                             //!< Current segment-part count.
+    int m_effectiveSegments = 1;                    //!< Runtime segment count in use.
     qint64 m_totalSize = 0;                         //!< Total content size.
 
     QVector<Segment> m_segmentsInfo;                //!< Segment list.
@@ -708,6 +725,12 @@ private:
      * and custom headers before dispatching the request.
      */
     void startSegment(Segment* segment);
+
+    //!< @brief Rebalance in-flight ranges by splitting large active segments.
+    void rebalanceSegments();
+
+    //!< @brief Split the largest remaining active segment to keep connections busy.
+    bool splitLargestRemainingSegment();
 
     /**
      * @brief Start or resume a single-stream download.
