@@ -290,7 +290,7 @@ if(CMAKE_PREFIX_PATH)
     set(CMAKE_PREFIX_PATH "${CMAKE_PREFIX_PATH}" CACHE STRING "Qt search prefixes" FORCE)
 endif()
 
-find_package(Qt6 REQUIRED COMPONENTS Quick QuickControls2 Network Concurrent)
+find_package(Qt6 REQUIRED COMPONENTS Quick QuickControls2 Network Concurrent Gui)
 
 qt_standard_project_setup(REQUIRES 6.8)
 
@@ -369,6 +369,20 @@ set(qml_files
         # ${qml_dashboard}
 )
 
+function(raad_filter_existing out_var)
+    set(_filtered "")
+    foreach(_rel IN LISTS ARGN)
+        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_rel}")
+            list(APPEND _filtered "${_rel}")
+        else()
+            message(STATUS "Skipping missing UI file: ${_rel}")
+        endif()
+    endforeach()
+    set(${out_var} "${_filtered}" PARENT_SCOPE)
+endfunction()
+
+raad_filter_existing(qml_files_existing ${qml_files})
+
 # ---- Mark singletons ----
 set(qml_singletons
         ui/Core/AppGlobals.qml
@@ -380,18 +394,22 @@ set(qml_singletons
         ui/Core/Colors.qml
 )
 
-set_source_files_properties(${qml_singletons} PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
+raad_filter_existing(qml_singletons_existing ${qml_singletons})
+set_source_files_properties(${qml_singletons_existing} PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
+
+set(qml_resource_files
+       "ui/Resources/fonts/Inter_24pt-Medium.ttf"
+       "ui/Resources/fonts/fa-brands-400.woff2"
+       "ui/Resources/fonts/fa-regular-400.woff2"
+       "ui/Resources/fonts/fa-solid-900.woff2"
+       "ui/Resources/image/avatar.svg"
+)
+raad_filter_existing(qml_resource_files_existing ${qml_resource_files})
 
 qt_add_resources(${APP_NAME} RaadAssets
        PREFIX /
        FILES
-       "ui/Resources/fonts/Inter_24pt-Medium.ttf"
-
-       "ui/Resources/fonts/fa-brands-400.woff2"
-       "ui/Resources/fonts/fa-regular-400.woff2"
-       "ui/Resources/fonts/fa-solid-900.woff2"
-
-       "ui/Resources/image/avatar.svg"
+       ${qml_resource_files_existing}
 )
 
 set(RAAD_MODULE_IFS
@@ -416,30 +434,39 @@ set(RAAD_IMPL_SOURCES
     src/services/update_client.cpp
 )
 
-qt_add_qml_module(${APP_NAME}
-        URI Raad
-        VERSION 1.0
-        QML_FILES
-        ${qml_files}
-        RESOURCES
+set(qml_module_resources
         ui/Core/qmldir
         ui/Controls/qmldir
         ui/Layout/qmldir
         ui/Dashboard/qmldir
+)
+raad_filter_existing(qml_module_resources_existing ${qml_module_resources})
+
+qt_add_qml_module(${APP_NAME}
+        URI Raad
+        VERSION 1.0
+        QML_FILES
+        ${qml_files_existing}
+        RESOURCES
+        ${qml_module_resources_existing}
 
         SOURCES
         ${RAAD_IMPL_SOURCES}
 )
 
-target_sources(${APP_NAME}
-    PUBLIC
-    FILE_SET CXX_MODULES TYPE CXX_MODULES
-    BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/src
-    FILES ${RAAD_MODULE_IFS}
-)
-
 if(RAAD_USE_MODULES)
+    target_sources(${APP_NAME}
+        PUBLIC
+        FILE_SET CXX_MODULES TYPE CXX_MODULES
+        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/src
+        FILES ${RAAD_MODULE_IFS}
+    )
     set_property(TARGET ${APP_NAME} PROPERTY CXX_SCAN_FOR_MODULES ON)
+else()
+    message(FATAL_ERROR
+        "RAAD_USE_MODULES=OFF is not supported in this source tree because backend sources import project modules. "
+        "Build with RAAD_USE_MODULES=ON and a compiler that supports module dependency scanning."
+    )
 endif()
 
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
@@ -468,6 +495,44 @@ target_compile_definitions(${APP_NAME}
 target_include_directories(${APP_NAME}
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+
+option(RAAD_BUILD_TESTS "Build backend tests" ON)
+if(RAAD_BUILD_TESTS)
+    enable_testing()
+    find_package(Qt6 REQUIRED COMPONENTS Test Gui)
+
+    qt_add_executable(raad_backend_tests
+        tests/backend_tests.cpp
+    )
+
+    if(RAAD_USE_MODULES)
+        target_sources(raad_backend_tests
+            PUBLIC
+            FILE_SET CXX_MODULES TYPE CXX_MODULES
+            BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/src
+            FILES ${RAAD_MODULE_IFS}
+        )
+    endif()
+
+    target_sources(raad_backend_tests
+        PRIVATE
+        ${RAAD_IMPL_SOURCES}
+    )
+
+    if(RAAD_USE_MODULES)
+        set_property(TARGET raad_backend_tests PROPERTY CXX_SCAN_FOR_MODULES ON)
+    endif()
+
+    target_link_libraries(raad_backend_tests
+        PRIVATE Qt6::Test Qt6::Network Qt6::Concurrent Qt6::Gui
+    )
+
+    target_include_directories(raad_backend_tests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    add_test(NAME raad_backend_tests COMMAND raad_backend_tests)
+endif()
 
 
 include(GNUInstallDirs)

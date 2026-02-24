@@ -1,4 +1,5 @@
 module;
+#include <limits>
 #include <QCoreApplication>
 #include <QDebug>
 #include <QDesktopServices>
@@ -9,6 +10,7 @@ module;
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonParseError>
 #include <QJsonValue>
 #include <QProcess>
 #include <QSaveFile>
@@ -23,7 +25,10 @@ module;
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
+#include <QNetworkProxy>
+#include <QSslError>
 #include <QByteArrayView>
+#include <QRandomGenerator>
 #include <QtConcurrent>
 
 module raad.core.downloadmanager;
@@ -99,6 +104,8 @@ DownloadManager::DownloadManager(QObject* parent) : QObject(parent) {
     if (!baseDir.isEmpty()) {
         QDir().mkpath(baseDir);
         m_sessionPath = baseDir + "/downloads.json";
+        m_sessionBackupPath = baseDir + "/downloads.json.bak";
+        m_telemetryPath = baseDir + "/telemetry.ndjson";
     }
 
     ensureDefaultQueue();
@@ -125,6 +132,92 @@ void DownloadManager::setNetworkTestState(bool running, const QString& message, 
     if (changed) {
         emit networkTestStateChanged();
     }
+}
+
+QString DownloadManager::taskHost(DownloaderTask* task) const
+{
+    if (!task) return QString();
+    const QUrl url(task->url());
+    return utils::normalizeHost(url.host());
+}
+
+bool DownloadManager::isRetryableFailure(DownloaderTask* task) const
+{
+    if (!task) return false;
+    const int status = task->lastHttpStatus();
+    const int netErr = task->lastNetworkError();
+
+    if (status == 408 || status == 409 || status == 425 || status == 429) return true;
+    if (status >= 500 && status <= 599) return true;
+    if (status >= 400 && status <= 499) return false;
+
+    if (netErr < 0) return true;
+    const auto err = static_cast<QNetworkReply::NetworkError>(netErr);
+    switch (err) {
+    case QNetworkReply::AuthenticationRequiredError:
+    case QNetworkReply::ContentAccessDenied:
+    case QNetworkReply::ContentNotFoundError:
+    case QNetworkReply::ProtocolFailure:
+    case QNetworkReply::ProtocolInvalidOperationError:
+        return false;
+    default:
+        return true;
+    }
+}
+
+int DownloadManager::nextRetryDelayMs(DownloaderTask* task, int attempt) const
+{
+    const int baseSec = (task && task->retryDelaySec() >= 0) ? task->retryDelaySec() : m_autoRetryDelaySec;
+    const int safeBaseSec = qBound(1, baseSec, 120);
+    const int cappedAttempt = qBound(0, attempt, 8);
+    qint64 delayMs = static_cast<qint64>(safeBaseSec) * 1000;
+    delayMs *= (1ll << cappedAttempt);
+    const int jitterMs = QRandomGenerator::global()->bounded(safeBaseSec * 350 + 1);
+    delayMs += jitterMs;
+    return static_cast<int>(qBound<qint64>(500, delayMs, 10ll * 60 * 1000));
+}
+
+bool DownloadManager::hostCooldownAllowsStart(const QString& host, qint64 nowMs) const
+{
+    if (host.isEmpty()) return true;
+    return m_hostCooldownUntilMs.value(host, 0) <= nowMs;
+}
+
+void DownloadManager::writeTelemetryEvent(const QString& name, const QVariantMap& payload)
+{
+    QVariantMap event = payload;
+    event.insert(QStringLiteral("name"), name);
+    event.insert(QStringLiteral("ts"), QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+    emit backendEvent(name, event);
+    if (!m_telemetryEnabled || m_telemetryPath.isEmpty()) return;
+
+    QFile file(m_telemetryPath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) return;
+    QJsonObject obj = QJsonObject::fromVariantMap(event);
+    file.write(QJsonDocument(obj).toJson(QJsonDocument::Compact));
+    file.write("\n");
+    file.close();
+}
+
+QJsonDocument DownloadManager::loadSessionDocument() const
+{
+    auto parsePath = [](const QString& path) -> QJsonDocument {
+        if (path.isEmpty()) return QJsonDocument();
+        QFile file(path);
+        if (!file.exists()) return QJsonDocument();
+        if (!file.open(QIODevice::ReadOnly)) return QJsonDocument();
+        const QByteArray raw = file.readAll();
+        file.close();
+        QJsonParseError err;
+        const QJsonDocument doc = QJsonDocument::fromJson(raw, &err);
+        if (err.error != QJsonParseError::NoError) return QJsonDocument();
+        return doc;
+    };
+
+    QJsonDocument doc = parsePath(m_sessionPath);
+    if (doc.isObject()) return doc;
+    doc = parsePath(m_sessionBackupPath);
+    return doc;
 }
 
 void DownloadManager::addDownload(const QString &urlStr, const QString &filePath) {
@@ -220,6 +313,7 @@ DownloaderTask* DownloadManager::addDownloadInternal(const QString &urlStr,
     DownloaderTask* task = createTask(url, normalizedPath, resolvedQueue, resolvedCategory, segments);
     if (task && options) {
         applyTaskOptions(task, *options);
+        m_taskPriority[task] = task->priority();
     }
     if (startPaused && task) {
         task->markPaused();
@@ -259,20 +353,40 @@ void DownloadManager::applyTaskOptions(DownloaderTask* task, const QVariantMap& 
         }
     }
     if (!headers.isEmpty()) task->setCustomHeaders(headers);
+    const QString userAgent = options.contains("userAgent")
+        ? options.value("userAgent").toString().trimmed()
+        : m_defaultUserAgent;
+    task->setUserAgent(userAgent);
+    bool allowInsecureSsl = m_defaultAllowInsecureSsl;
+    if (options.contains("allowInsecureSsl")) {
+        allowInsecureSsl = options.value("allowInsecureSsl").toBool();
+    } else if (options.contains("ignoreSslErrors")) {
+        allowInsecureSsl = options.value("ignoreSslErrors").toBool();
+    }
+    task->setAllowInsecureSsl(allowInsecureSsl);
     const QString cookieHeader = options.value("cookieHeader").toString();
     if (!cookieHeader.isEmpty()) task->setCookieHeader(cookieHeader);
     const QString authUser = options.value("authUser").toString();
     const QString authPassword = options.value("authPassword").toString();
     if (!authUser.isEmpty()) task->setAuthUser(authUser);
     if (!authPassword.isEmpty()) task->setAuthPassword(authPassword);
-    const QString proxyHost = options.value("proxyHost").toString();
-    const int proxyPort = options.value("proxyPort").toInt(0);
-    const QString proxyUser = options.value("proxyUser").toString();
-    const QString proxyPassword = options.value("proxyPassword").toString();
-    if (!proxyHost.isEmpty()) task->setProxyHost(proxyHost);
-    if (proxyPort > 0) task->setProxyPort(proxyPort);
-    if (!proxyUser.isEmpty()) task->setProxyUser(proxyUser);
-    if (!proxyPassword.isEmpty()) task->setProxyPassword(proxyPassword);
+    const QString proxyHost = options.contains("proxyHost")
+        ? options.value("proxyHost").toString().trimmed()
+        : m_defaultProxyHost;
+    const int proxyPortRaw = options.contains("proxyPort")
+        ? options.value("proxyPort").toInt(0)
+        : m_defaultProxyPort;
+    const int proxyPort = qBound(0, proxyPortRaw, 65535);
+    const QString proxyUser = options.contains("proxyUser")
+        ? options.value("proxyUser").toString()
+        : m_defaultProxyUser;
+    const QString proxyPassword = options.contains("proxyPassword")
+        ? options.value("proxyPassword").toString()
+        : m_defaultProxyPassword;
+    task->setProxyHost(proxyHost);
+    task->setProxyPort(proxyPort);
+    task->setProxyUser(proxyUser);
+    task->setProxyPassword(proxyPassword);
 
     if (options.contains("retryMax")) {
         bool ok = false;
@@ -283,6 +397,15 @@ void DownloadManager::applyTaskOptions(DownloaderTask* task, const QVariantMap& 
         bool ok = false;
         const int value = options.value("retryDelaySec").toInt(&ok);
         task->setRetryDelaySec(ok ? value : -1);
+    }
+
+    if (options.contains("priority")) {
+        bool ok = false;
+        const int value = options.value("priority").toInt(&ok);
+        if (ok) task->setPriority(qBound(0, value, 1000));
+    }
+    if (options.contains("adaptiveSegments")) {
+        task->setAdaptiveSegmentsEnabled(options.value("adaptiveSegments").toBool());
     }
 
     if (options.contains("postOpenFile")) task->setPostOpenFile(options.value("postOpenFile").toBool());
@@ -308,7 +431,19 @@ void DownloadManager::onTaskFinishedWrapper(bool success) {
 
     const QString state = t->stateString();
     const QString name = QFileInfo(t->fileName()).fileName();
+    writeTelemetryEvent(QStringLiteral("task_finished"),
+                        {
+                            {QStringLiteral("name"), name},
+                            {QStringLiteral("state"), state},
+                            {QStringLiteral("url"), t->url()},
+                            {QStringLiteral("errorCode"), t->errorCode()},
+                            {QStringLiteral("errorCategory"), t->errorCategory()},
+                            {QStringLiteral("httpStatus"), t->lastHttpStatus()},
+                            {QStringLiteral("networkError"), t->lastNetworkError()}
+                        });
+
     if (state == "Done") {
+        m_taskRetryCount[t] = 0;
         emit toastRequested(QStringLiteral("Download finished: %1").arg(name), QStringLiteral("success"));
         applyPostActions(t);
         if (t->verifyOnComplete() || !t->checksumExpected().isEmpty()) {
@@ -328,19 +463,39 @@ void DownloadManager::onTaskFinishedWrapper(bool success) {
             startQueued();
         } else {
             const int maxRetries = t->retryMax() >= 0 ? t->retryMax() : m_autoRetryMax;
-            const int delaySec = t->retryDelaySec() >= 0 ? t->retryDelaySec() : m_autoRetryDelaySec;
             int attempts = m_taskRetryCount.value(t, 0);
-            if (attempts < maxRetries) {
+            const bool retryable = isRetryableFailure(t);
+            if (retryable && attempts < maxRetries) {
                 m_taskRetryCount[t] = attempts + 1;
                 QPointer<DownloaderTask> taskPtr(t);
-                emit toastRequested(QStringLiteral("Retrying in %1s: %2").arg(delaySec).arg(name), QStringLiteral("warning"));
-                QTimer::singleShot(delaySec * 1000, this, [this, taskPtr]() {
+                const int delayMs = nextRetryDelayMs(t, attempts);
+                const int delaySecUi = qMax(1, delayMs / 1000);
+                const QString host = taskHost(t);
+                if (!host.isEmpty() && (t->lastHttpStatus() == 429 || t->lastHttpStatus() == 503 || t->lastHttpStatus() == 504)) {
+                    m_hostCooldownUntilMs[host] = QDateTime::currentMSecsSinceEpoch() + delayMs;
+                }
+                emit toastRequested(QStringLiteral("Retrying in %1s: %2").arg(delaySecUi).arg(name), QStringLiteral("warning"));
+                QTimer::singleShot(delayMs, this, [this, taskPtr, host]() {
                     if (!taskPtr) return;
                     if (taskPtr->stateString() == "Error") {
+                        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+                        if (!host.isEmpty() && !hostCooldownAllowsStart(host, nowMs)) {
+                            const int remaining = static_cast<int>(qMax<qint64>(100, m_hostCooldownUntilMs.value(host, 0) - nowMs));
+                            QTimer::singleShot(remaining, this, [this, taskPtr]() {
+                                if (!taskPtr) return;
+                                if (taskPtr->stateString() == "Error") {
+                                    taskPtr->restart();
+                                    startQueued();
+                                }
+                            });
+                            return;
+                        }
                         taskPtr->restart();
                         startQueued();
                     }
                 });
+            } else if (!retryable) {
+                emit toastRequested(QStringLiteral("Not retryable: %1").arg(name), QStringLiteral("warning"));
             }
         }
     }
@@ -358,6 +513,85 @@ void DownloadManager::setMaxConcurrent(int v)
     m_maxConcurrent = v;
     emit maxConcurrentChanged();
     startQueued();
+    scheduleSave();
+}
+
+void DownloadManager::setPerHostMaxConcurrent(int value)
+{
+    if (value < 1) value = 1;
+    if (m_perHostMaxConcurrent == value) return;
+    m_perHostMaxConcurrent = value;
+    emit schedulingPolicyChanged();
+    startQueued();
+    scheduleSave();
+}
+
+void DownloadManager::setPersistSensitiveOptions(bool enabled)
+{
+    if (m_persistSensitiveOptions == enabled) return;
+    m_persistSensitiveOptions = enabled;
+    emit persistencePolicyChanged();
+    scheduleSave();
+}
+
+void DownloadManager::setTelemetryEnabled(bool enabled)
+{
+    if (m_telemetryEnabled == enabled) return;
+    m_telemetryEnabled = enabled;
+    emit telemetryPolicyChanged();
+    scheduleSave();
+}
+
+void DownloadManager::setDefaultUserAgent(const QString& value)
+{
+    const QString next = value.trimmed().isEmpty()
+        ? QStringLiteral("raad/1.0")
+        : value.trimmed();
+    if (m_defaultUserAgent == next) return;
+    m_defaultUserAgent = next;
+    emit networkDefaultsChanged();
+    scheduleSave();
+}
+
+void DownloadManager::setDefaultAllowInsecureSsl(bool enabled)
+{
+    if (m_defaultAllowInsecureSsl == enabled) return;
+    m_defaultAllowInsecureSsl = enabled;
+    emit networkDefaultsChanged();
+    scheduleSave();
+}
+
+void DownloadManager::setDefaultProxyHost(const QString& value)
+{
+    const QString next = value.trimmed();
+    if (m_defaultProxyHost == next) return;
+    m_defaultProxyHost = next;
+    emit networkDefaultsChanged();
+    scheduleSave();
+}
+
+void DownloadManager::setDefaultProxyPort(int value)
+{
+    const int next = qBound(0, value, 65535);
+    if (m_defaultProxyPort == next) return;
+    m_defaultProxyPort = next;
+    emit networkDefaultsChanged();
+    scheduleSave();
+}
+
+void DownloadManager::setDefaultProxyUser(const QString& value)
+{
+    if (m_defaultProxyUser == value) return;
+    m_defaultProxyUser = value;
+    emit networkDefaultsChanged();
+    scheduleSave();
+}
+
+void DownloadManager::setDefaultProxyPassword(const QString& value)
+{
+    if (m_defaultProxyPassword == value) return;
+    m_defaultProxyPassword = value;
+    emit networkDefaultsChanged();
     scheduleSave();
 }
 
@@ -431,34 +665,91 @@ void DownloadManager::updatePowerState()
 void DownloadManager::startQueued()
 {
     QHash<QString, int> runningPerQueue;
+    QHash<QString, int> runningPerHost;
     int running = 0;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     for (DownloaderTask* t : m_queue) {
         if (t && t->isRunning()) {
             running++;
             const QString qname = m_taskQueue.value(t, defaultQueueName());
             runningPerQueue[qname] = runningPerQueue.value(qname, 0) + 1;
+            const QString host = taskHost(t);
+            if (!host.isEmpty()) {
+                runningPerHost[host] = runningPerHost.value(host, 0) + 1;
+            }
         }
     }
 
     const QTime now = QTime::currentTime();
+    if (m_pauseOnBattery && m_onBattery) {
+        emit countsChanged();
+        return;
+    }
+
+    QVector<DownloaderTask*> candidates;
+    candidates.reserve(m_queue.size());
     for (DownloaderTask* candidate : m_queue) {
-        if (running >= m_maxConcurrent) break;
         if (!candidate || !candidate->isIdle()) continue;
-        if (m_pauseOnBattery && m_onBattery) continue;
+        candidates.append(candidate);
+    }
 
-        const QString qname = m_taskQueue.value(candidate, defaultQueueName());
-        if (!m_queues.contains(qname)) createQueue(qname);
-        const QueueInfo* info = queueInfo(qname);
-        if (!info) continue;
-        if (!isQueueAllowed(*info, now)) continue;
+    while (running < m_maxConcurrent) {
+        DownloaderTask* best = nullptr;
+        QString bestQueue;
+        QString bestHost;
+        int bestPriority = std::numeric_limits<int>::min();
+        int bestQueuePressure = std::numeric_limits<int>::max();
+        int bestHostPressure = std::numeric_limits<int>::max();
+        qint64 bestOrder = std::numeric_limits<qint64>::max();
 
-        const int queueLimit = info->maxConcurrent > 0 ? info->maxConcurrent : m_maxConcurrent;
-        if (runningPerQueue.value(qname, 0) >= queueLimit) continue;
+        for (DownloaderTask* candidate : candidates) {
+            if (!candidate || !candidate->isIdle()) continue;
 
-        applyTaskSpeed(candidate);
-        candidate->start();
+            const QString qname = m_taskQueue.value(candidate, defaultQueueName());
+            if (!m_queues.contains(qname)) createQueue(qname);
+            const QueueInfo* info = queueInfo(qname);
+            if (!info) continue;
+            if (!isQueueAllowed(*info, now)) continue;
+
+            const int queueLimit = info->maxConcurrent > 0 ? info->maxConcurrent : m_maxConcurrent;
+            const int queuePressure = runningPerQueue.value(qname, 0);
+            if (queuePressure >= queueLimit) continue;
+
+            const QString host = taskHost(candidate);
+            if (!host.isEmpty()) {
+                if (!hostCooldownAllowsStart(host, nowMs)) continue;
+                if (m_perHostMaxConcurrent > 0 && runningPerHost.value(host, 0) >= m_perHostMaxConcurrent) continue;
+            }
+
+            const int priority = m_taskPriority.value(candidate, candidate->priority());
+            const int hostPressure = host.isEmpty() ? 0 : runningPerHost.value(host, 0);
+            const qint64 createdOrder = m_taskCreatedOrder.value(candidate, std::numeric_limits<qint64>::max());
+
+            const bool better =
+                (priority > bestPriority) ||
+                (priority == bestPriority && queuePressure < bestQueuePressure) ||
+                (priority == bestPriority && queuePressure == bestQueuePressure && hostPressure < bestHostPressure) ||
+                (priority == bestPriority && queuePressure == bestQueuePressure && hostPressure == bestHostPressure && createdOrder < bestOrder);
+
+            if (better) {
+                best = candidate;
+                bestQueue = qname;
+                bestHost = host;
+                bestPriority = priority;
+                bestQueuePressure = queuePressure;
+                bestHostPressure = hostPressure;
+                bestOrder = createdOrder;
+            }
+        }
+
+        if (!best) break;
+        applyTaskSpeed(best);
+        best->start();
         running++;
-        runningPerQueue[qname] = runningPerQueue.value(qname, 0) + 1;
+        runningPerQueue[bestQueue] = runningPerQueue.value(bestQueue, 0) + 1;
+        if (!bestHost.isEmpty()) {
+            runningPerHost[bestHost] = runningPerHost.value(bestHost, 0) + 1;
+        }
     }
     emit countsChanged();
 }
@@ -475,6 +766,8 @@ void DownloadManager::removeDownload(int index)
     m_taskMaxSpeed.remove(task);
     m_taskCompletedAt.remove(task);
     m_taskRetryCount.remove(task);
+    m_taskPriority.remove(task);
+    m_taskCreatedOrder.remove(task);
     m_taskQueue.remove(task);
     m_taskCategory.remove(task);
     m_taskPausedBySchedule.remove(task);
@@ -507,6 +800,8 @@ void DownloadManager::clearCompleted()
                 m_taskMaxSpeed.remove(task);
                 m_taskCompletedAt.remove(task);
                 m_taskRetryCount.remove(task);
+                m_taskPriority.remove(task);
+                m_taskCreatedOrder.remove(task);
                 m_taskQueue.remove(task);
                 m_taskCategory.remove(task);
                 m_taskPausedBySchedule.remove(task);
@@ -561,10 +856,13 @@ void DownloadManager::cancelAll()
     m_taskMaxSpeed.clear();
     m_taskCompletedAt.clear();
     m_taskRetryCount.clear();
+    m_taskPriority.clear();
+    m_taskCreatedOrder.clear();
     m_taskQueue.clear();
     m_taskCategory.clear();
     m_taskPausedBySchedule.clear();
     m_taskPausedByQuota.clear();
+    m_taskPausedByBattery.clear();
     updateTotals();
     emit countsChanged();
     scheduleSave();
@@ -803,6 +1101,13 @@ qint64 DownloadManager::taskCompletedAt(int index) const
     return m_taskCompletedAt.value(task, 0);
 }
 
+int DownloadManager::taskPriority(int index) const
+{
+    DownloaderTask* task = m_model.taskAt(index);
+    if (!task) return 100;
+    return m_taskPriority.value(task, task->priority());
+}
+
 void DownloadManager::setTaskMaxSpeed(int index, qint64 bytesPerSecond)
 {
     DownloaderTask* task = m_model.taskAt(index);
@@ -812,6 +1117,18 @@ void DownloadManager::setTaskMaxSpeed(int index, qint64 bytesPerSecond)
     m_taskMaxSpeed[task] = bytesPerSecond;
     applyTaskSpeed(task);
     scheduleSave();
+}
+
+void DownloadManager::setTaskPriority(int index, int priority)
+{
+    DownloaderTask* task = m_model.taskAt(index);
+    if (!task) return;
+    const int normalized = qBound(0, priority, 1000);
+    if (m_taskPriority.value(task, task->priority()) == normalized) return;
+    m_taskPriority[task] = normalized;
+    task->setPriority(normalized);
+    scheduleSave();
+    startQueued();
 }
 
 void DownloadManager::pauseTask(int index)
@@ -991,6 +1308,14 @@ void DownloadManager::testUrl(const QString& urlStr)
     setNetworkTestState(true, QStringLiteral("Testing %1 ...").arg(hostLabel), QStringLiteral("info"));
 
     QNetworkAccessManager* net = new QNetworkAccessManager(this);
+    if (!m_defaultProxyHost.isEmpty() && m_defaultProxyPort > 0) {
+        QNetworkProxy proxy(QNetworkProxy::HttpProxy,
+                            m_defaultProxyHost,
+                            m_defaultProxyPort,
+                            m_defaultProxyUser,
+                            m_defaultProxyPassword);
+        net->setProxy(proxy);
+    }
     auto finishResult = [this, net](bool success, const QString& message, const QString& kind) {
         const QString resolvedKind = success ? kind : QStringLiteral("danger");
         setNetworkTestState(false, message, resolvedKind);
@@ -1000,8 +1325,15 @@ void DownloadManager::testUrl(const QString& urlStr)
 
     QNetworkRequest headReq(url);
     headReq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-    headReq.setRawHeader("User-Agent", "raad/1.0");
+    headReq.setRawHeader("User-Agent", m_defaultUserAgent.toUtf8());
     QNetworkReply* headReply = net->head(headReq);
+#if QT_CONFIG(ssl)
+    connect(headReply, &QNetworkReply::sslErrors, this, [this, headReply](const QList<QSslError>& errors) {
+        if (m_defaultAllowInsecureSsl && headReply) {
+            headReply->ignoreSslErrors(errors);
+        }
+    });
+#endif
 
     connect(headReply, &QNetworkReply::finished, this, [this, headReply, url, startedMs, finishResult, net]() mutable {
         const int status = headReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -1035,9 +1367,16 @@ void DownloadManager::testUrl(const QString& urlStr)
 
         QNetworkRequest getReq(url);
         getReq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-        getReq.setRawHeader("User-Agent", "raad/1.0");
+        getReq.setRawHeader("User-Agent", m_defaultUserAgent.toUtf8());
         getReq.setRawHeader("Range", "bytes=0-262143");
         QNetworkReply* getReply = net->get(getReq);
+#if QT_CONFIG(ssl)
+        connect(getReply, &QNetworkReply::sslErrors, this, [this, getReply](const QList<QSslError>& errors) {
+            if (m_defaultAllowInsecureSsl && getReply) {
+                getReply->ignoreSslErrors(errors);
+            }
+        });
+#endif
         qint64* probeBytes = new qint64(0);
 
         connect(getReply, &QNetworkReply::readyRead, this, [getReply, probeBytes]() {
@@ -1435,6 +1774,89 @@ void DownloadManager::copyText(const QString& text) const
     }
 }
 
+QString DownloadManager::processApiCommand(const QString& commandJson)
+{
+    QJsonParseError err;
+    const QJsonDocument doc = QJsonDocument::fromJson(commandJson.toUtf8(), &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) {
+        return QString::fromUtf8(
+            QJsonDocument(QJsonObject{
+                {QStringLiteral("ok"), false},
+                {QStringLiteral("error"), QStringLiteral("invalid_json")}
+            }).toJson(QJsonDocument::Compact));
+    }
+
+    const QJsonObject req = doc.object();
+    const QString cmd = req.value(QStringLiteral("cmd")).toString().trimmed();
+    if (cmd.isEmpty()) {
+        return QString::fromUtf8(
+            QJsonDocument(QJsonObject{
+                {QStringLiteral("ok"), false},
+                {QStringLiteral("error"), QStringLiteral("missing_cmd")}
+            }).toJson(QJsonDocument::Compact));
+    }
+
+    QJsonObject res{
+        {QStringLiteral("ok"), true},
+        {QStringLiteral("cmd"), cmd}
+    };
+
+    if (cmd == QStringLiteral("stats")) {
+        res.insert(QStringLiteral("active"), activeCount());
+        res.insert(QStringLiteral("queued"), queuedCount());
+        res.insert(QStringLiteral("completed"), completedCount());
+        res.insert(QStringLiteral("speed"), static_cast<double>(totalSpeed()));
+    } else if (cmd == QStringLiteral("pauseAll")) {
+        pauseAll();
+    } else if (cmd == QStringLiteral("resumeAll")) {
+        resumeAll();
+    } else if (cmd == QStringLiteral("cancelAll")) {
+        cancelAll();
+    } else if (cmd == QStringLiteral("add")) {
+        const QString url = req.value(QStringLiteral("url")).toString();
+        const QString filePath = req.value(QStringLiteral("filePath")).toString();
+        const QString queueName = req.value(QStringLiteral("queueName")).toString();
+        const QString category = req.value(QStringLiteral("category")).toString();
+        const bool startPaused = req.value(QStringLiteral("startPaused")).toBool(false);
+        QVariantMap options;
+        if (req.contains(QStringLiteral("options")) && req.value(QStringLiteral("options")).isObject()) {
+            options = req.value(QStringLiteral("options")).toObject().toVariantMap();
+        }
+        if (url.trimmed().isEmpty()) {
+            res[QStringLiteral("ok")] = false;
+            res.insert(QStringLiteral("error"), QStringLiteral("missing_url"));
+        } else {
+            addDownloadAdvancedWithExtras(url, filePath, queueName, category, startPaused, options);
+        }
+    } else if (cmd == QStringLiteral("setNetworkDefaults")) {
+        if (req.contains(QStringLiteral("userAgent"))) {
+            setDefaultUserAgent(req.value(QStringLiteral("userAgent")).toString());
+        }
+        if (req.contains(QStringLiteral("allowInsecureSsl"))) {
+            setDefaultAllowInsecureSsl(req.value(QStringLiteral("allowInsecureSsl")).toBool(m_defaultAllowInsecureSsl));
+        }
+        if (req.contains(QStringLiteral("proxyHost"))) {
+            setDefaultProxyHost(req.value(QStringLiteral("proxyHost")).toString());
+        }
+        if (req.contains(QStringLiteral("proxyPort"))) {
+            setDefaultProxyPort(req.value(QStringLiteral("proxyPort")).toInt(0));
+        }
+        if (req.contains(QStringLiteral("proxyUser"))) {
+            setDefaultProxyUser(req.value(QStringLiteral("proxyUser")).toString());
+        }
+        if (req.contains(QStringLiteral("proxyPassword"))) {
+            setDefaultProxyPassword(req.value(QStringLiteral("proxyPassword")).toString());
+        }
+    } else if (cmd == QStringLiteral("retryFailed")) {
+        retryFailed();
+    } else {
+        res[QStringLiteral("ok")] = false;
+        res.insert(QStringLiteral("error"), QStringLiteral("unknown_cmd"));
+    }
+
+    return QString::fromUtf8(QJsonDocument(res).toJson(QJsonDocument::Compact));
+}
+
 void DownloadManager::onTaskProgress(qint64 bytesReceived, qint64 bytesTotal)
 {
     auto* task = qobject_cast<DownloaderTask*>(sender());
@@ -1495,12 +1917,20 @@ DownloaderTask* DownloadManager::createTask(const QUrl& url,
                                             int segments)
 {
     DownloaderTask* task = new DownloaderTask(url, filePath, segments, this);
+    task->setUserAgent(m_defaultUserAgent);
+    task->setAllowInsecureSsl(m_defaultAllowInsecureSsl);
+    task->setProxyHost(m_defaultProxyHost);
+    task->setProxyPort(qBound(0, m_defaultProxyPort, 65535));
+    task->setProxyUser(m_defaultProxyUser);
+    task->setProxyPassword(m_defaultProxyPassword);
     m_taskQueue[task] = queueName;
     m_taskCategory[task] = category;
     m_taskLastReceived[task] = 0;
     m_taskMaxSpeed[task] = 0;
     m_taskCompletedAt[task] = 0;
     m_taskRetryCount[task] = 0;
+    m_taskPriority[task] = task->priority();
+    m_taskCreatedOrder[task] = ++m_taskOrderCounter;
     applyTaskSpeed(task);
 
     m_model.addDownload(task, queueName, category);
@@ -1521,6 +1951,23 @@ DownloaderTask* DownloadManager::createTask(const QUrl& url,
     connect(task, &DownloaderTask::postActionsChanged, this, &DownloadManager::scheduleSave);
     connect(task, &DownloaderTask::retryPolicyChanged, this, &DownloadManager::scheduleSave);
     connect(task, &DownloaderTask::networkOptionsChanged, this, &DownloadManager::scheduleSave);
+    connect(task, &DownloaderTask::priorityChanged, this, [this, task]() {
+        if (!task) return;
+        m_taskPriority[task] = task->priority();
+        scheduleSave();
+        startQueued();
+    });
+    connect(task, &DownloaderTask::errorStateChanged, this, [this, task]() {
+        writeTelemetryEvent(QStringLiteral("task_error_state"),
+                            {
+                                {QStringLiteral("url"), task ? task->url() : QString()},
+                                {QStringLiteral("errorCode"), task ? task->errorCode() : QString()},
+                                {QStringLiteral("errorCategory"), task ? task->errorCategory() : QString()},
+                                {QStringLiteral("errorMessage"), task ? task->errorMessage() : QString()},
+                                {QStringLiteral("httpStatus"), task ? task->lastHttpStatus() : 0},
+                                {QStringLiteral("networkError"), task ? task->lastNetworkError() : -1}
+                            });
+    });
 
     return task;
 }
@@ -1528,11 +1975,7 @@ DownloaderTask* DownloadManager::createTask(const QUrl& url,
 void DownloadManager::loadSession()
 {
     if (m_sessionPath.isEmpty()) return;
-    QFile file(m_sessionPath);
-    if (!file.exists()) return;
-    if (!file.open(QIODevice::ReadOnly)) return;
-
-    const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    const QJsonDocument doc = loadSessionDocument();
     if (!doc.isObject()) return;
     const QJsonObject root = doc.object();
 
@@ -1542,6 +1985,16 @@ void DownloadManager::loadSession()
     if (root.contains("globalMaxSpeed")) setGlobalMaxSpeed(static_cast<qint64>(root.value("globalMaxSpeed").toDouble(m_globalMaxSpeed)));
     if (root.contains("pauseOnBattery")) setPauseOnBattery(root.value("pauseOnBattery").toBool(false));
     if (root.contains("resumeOnAC")) setResumeOnAC(root.value("resumeOnAC").toBool(true));
+    if (root.contains("perHostMaxConcurrent")) setPerHostMaxConcurrent(root.value("perHostMaxConcurrent").toInt(m_perHostMaxConcurrent));
+    if (root.contains("persistSensitiveOptions")) setPersistSensitiveOptions(root.value("persistSensitiveOptions").toBool(false));
+    if (root.contains("telemetryEnabled")) setTelemetryEnabled(root.value("telemetryEnabled").toBool(true));
+    if (root.contains("defaultUserAgent")) setDefaultUserAgent(root.value("defaultUserAgent").toString(m_defaultUserAgent));
+    if (root.contains("defaultAllowInsecureSsl")) setDefaultAllowInsecureSsl(root.value("defaultAllowInsecureSsl").toBool(m_defaultAllowInsecureSsl));
+    const QJsonObject defaultProxyObj = root.value("defaultProxy").toObject();
+    if (defaultProxyObj.contains("host")) setDefaultProxyHost(defaultProxyObj.value("host").toString());
+    if (defaultProxyObj.contains("port")) setDefaultProxyPort(defaultProxyObj.value("port").toInt(0));
+    if (defaultProxyObj.contains("user")) setDefaultProxyUser(defaultProxyObj.value("user").toString());
+    if (defaultProxyObj.contains("password")) setDefaultProxyPassword(defaultProxyObj.value("password").toString());
 
     m_queues.clear();
     m_queueOrder.clear();
@@ -1611,6 +2064,10 @@ void DownloadManager::loadSession()
         const QString etag = obj.value("etag").toString();
         const QString lastModified = obj.value("lastModified").toString();
         const QString resumeWarning = obj.value("resumeWarning").toString();
+        const int priority = obj.value("priority").toInt(100);
+        const bool adaptiveSegments = obj.contains("adaptiveSegments")
+            ? obj.value("adaptiveSegments").toBool(true)
+            : true;
         const QJsonArray mirrorsArray = obj.value("mirrors").toArray();
         QStringList mirrorUrls;
         for (const QJsonValue& mv : mirrorsArray) {
@@ -1639,11 +2096,23 @@ void DownloadManager::loadSession()
         }
         const QString authUser = obj.value("authUser").toString();
         const QString authPassword = obj.value("authPassword").toString();
+        const QString userAgent = obj.value("userAgent").toString(m_defaultUserAgent);
+        const bool allowInsecureSsl = obj.contains("allowInsecureSsl")
+            ? obj.value("allowInsecureSsl").toBool(m_defaultAllowInsecureSsl)
+            : m_defaultAllowInsecureSsl;
         const QJsonObject proxyObj = obj.value("proxy").toObject();
-        const QString proxyHost = proxyObj.value("host").toString();
-        const int proxyPort = proxyObj.value("port").toInt(0);
-        const QString proxyUser = proxyObj.value("user").toString();
-        const QString proxyPassword = proxyObj.value("password").toString();
+        const QString proxyHost = proxyObj.contains("host")
+            ? proxyObj.value("host").toString()
+            : m_defaultProxyHost;
+        const int proxyPort = proxyObj.contains("port")
+            ? proxyObj.value("port").toInt(0)
+            : m_defaultProxyPort;
+        const QString proxyUser = proxyObj.contains("user")
+            ? proxyObj.value("user").toString()
+            : m_defaultProxyUser;
+        const QString proxyPassword = proxyObj.contains("password")
+            ? proxyObj.value("password").toString()
+            : m_defaultProxyPassword;
 
         const QUrl url(urlStr);
         if (!filePath.isEmpty()) {
@@ -1717,12 +2186,17 @@ void DownloadManager::loadSession()
         if (!cookieHeader.isEmpty()) task->setCookieHeader(cookieHeader);
         if (!authUser.isEmpty()) task->setAuthUser(authUser);
         if (!authPassword.isEmpty()) task->setAuthPassword(authPassword);
-        if (!proxyHost.isEmpty()) task->setProxyHost(proxyHost);
-        if (proxyPort > 0) task->setProxyPort(proxyPort);
-        if (!proxyUser.isEmpty()) task->setProxyUser(proxyUser);
-        if (!proxyPassword.isEmpty()) task->setProxyPassword(proxyPassword);
+        task->setUserAgent(userAgent);
+        task->setAllowInsecureSsl(allowInsecureSsl);
+        task->setProxyHost(proxyHost);
+        task->setProxyPort(qBound(0, proxyPort, 65535));
+        task->setProxyUser(proxyUser);
+        task->setProxyPassword(proxyPassword);
         if (retryMax >= 0) task->setRetryMax(retryMax);
         if (retryDelay >= 0) task->setRetryDelaySec(retryDelay);
+        task->setPriority(qBound(0, priority, 1000));
+        task->setAdaptiveSegmentsEnabled(adaptiveSegments);
+        m_taskPriority[task] = task->priority();
         if (taskMaxSpeed > 0) {
             m_taskMaxSpeed[task] = taskMaxSpeed;
             applyTaskSpeed(task);
@@ -1781,11 +2255,24 @@ void DownloadManager::saveSession()
     if (m_restoreInProgress || m_sessionPath.isEmpty()) return;
 
     QJsonObject root;
-    root.insert("version", 4);
+    root.insert("version", 6);
     root.insert("maxConcurrent", m_maxConcurrent);
     root.insert("globalMaxSpeed", static_cast<double>(m_globalMaxSpeed));
     root.insert("pauseOnBattery", m_pauseOnBattery);
     root.insert("resumeOnAC", m_resumeOnAC);
+    root.insert("perHostMaxConcurrent", m_perHostMaxConcurrent);
+    root.insert("persistSensitiveOptions", m_persistSensitiveOptions);
+    root.insert("telemetryEnabled", m_telemetryEnabled);
+    root.insert("defaultUserAgent", m_defaultUserAgent);
+    root.insert("defaultAllowInsecureSsl", m_defaultAllowInsecureSsl);
+    QJsonObject defaultProxyObj;
+    defaultProxyObj.insert("host", m_defaultProxyHost);
+    defaultProxyObj.insert("port", m_defaultProxyPort);
+    if (m_persistSensitiveOptions) {
+        defaultProxyObj.insert("user", m_defaultProxyUser);
+        defaultProxyObj.insert("password", m_defaultProxyPassword);
+    }
+    root.insert("defaultProxy", defaultProxyObj);
 
     QJsonArray queues;
     for (const QString& name : m_queueOrder) {
@@ -1858,21 +2345,39 @@ void DownloadManager::saveSession()
         obj.insert("postScript", task->postScript());
         obj.insert("retryMax", task->retryMax());
         obj.insert("retryDelaySec", task->retryDelaySec());
-        QJsonArray headersArray;
-        for (const QString& header : task->customHeaders()) headersArray.append(header);
-        obj.insert("headers", headersArray);
-        obj.insert("cookieHeader", task->cookieHeader());
-        obj.insert("authUser", task->authUser());
-        obj.insert("authPassword", task->authPassword());
+        obj.insert("priority", m_taskPriority.value(task, task->priority()));
+        obj.insert("adaptiveSegments", task->adaptiveSegmentsEnabled());
+        obj.insert("userAgent", task->userAgent());
+        obj.insert("allowInsecureSsl", task->allowInsecureSsl());
+        obj.insert("errorCategory", task->errorCategory());
+        obj.insert("errorCode", task->errorCode());
+        obj.insert("errorMessage", task->errorMessage());
+        obj.insert("lastHttpStatus", task->lastHttpStatus());
+        obj.insert("lastNetworkError", task->lastNetworkError());
+        if (m_persistSensitiveOptions) {
+            QJsonArray headersArray;
+            for (const QString& header : task->customHeaders()) headersArray.append(header);
+            obj.insert("headers", headersArray);
+            obj.insert("cookieHeader", task->cookieHeader());
+            obj.insert("authUser", task->authUser());
+            obj.insert("authPassword", task->authPassword());
+        }
         QJsonObject proxyObj;
         proxyObj.insert("host", task->proxyHost());
         proxyObj.insert("port", task->proxyPort());
-        proxyObj.insert("user", task->proxyUser());
-        proxyObj.insert("password", task->proxyPassword());
+        if (m_persistSensitiveOptions) {
+            proxyObj.insert("user", task->proxyUser());
+            proxyObj.insert("password", task->proxyPassword());
+        }
         obj.insert("proxy", proxyObj);
         items.append(obj);
     }
     root.insert("items", items);
+
+    if (!m_sessionBackupPath.isEmpty() && QFile::exists(m_sessionPath)) {
+        QFile::remove(m_sessionBackupPath);
+        QFile::copy(m_sessionPath, m_sessionBackupPath);
+    }
 
     QSaveFile file(m_sessionPath);
     if (!file.open(QIODevice::WriteOnly)) return;

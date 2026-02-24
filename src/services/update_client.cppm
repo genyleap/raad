@@ -98,6 +98,12 @@ RAAD_MODULE_EXPORT class UpdateClient : public QObject {
     //!< @brief Download URL for the update.
     Q_PROPERTY(QString downloadUrl READ downloadUrl NOTIFY updateInfoChanged)
 
+    //!< @brief Expected SHA-256 for the selected asset.
+    Q_PROPERTY(QString expectedSha256 READ expectedSha256 NOTIFY updateInfoChanged)
+
+    //!< @brief Detached signature URL for the selected asset.
+    Q_PROPERTY(QString signatureUrl READ signatureUrl NOTIFY updateInfoChanged)
+
     //!< @brief Download progress (0-1).
     Q_PROPERTY(qreal downloadProgress READ downloadProgress NOTIFY downloadProgressChanged)
 
@@ -112,6 +118,15 @@ RAAD_MODULE_EXPORT class UpdateClient : public QObject {
 
     //!< @brief Whether a download is ready to install.
     Q_PROPERTY(bool downloadReady READ downloadReady NOTIFY downloadReadyChanged)
+
+    //!< @brief Require signature verification before install.
+    Q_PROPERTY(bool requireSignature READ requireSignature WRITE setRequireSignature NOTIFY signaturePolicyChanged)
+
+    //!< @brief Path to public key PEM for signature verification.
+    Q_PROPERTY(QString publicKeyPath READ publicKeyPath WRITE setPublicKeyPath NOTIFY publicKeyPathChanged)
+
+    //!< @brief Whether last downloaded payload passed signature verification.
+    Q_PROPERTY(bool signatureVerified READ signatureVerified NOTIFY signatureVerificationChanged)
 
 public:
     /**
@@ -189,6 +204,12 @@ public:
     //!< @brief Return download URL.
     QString downloadUrl() const { return m_downloadUrl; }
 
+    //!< @brief Return expected SHA-256 checksum.
+    QString expectedSha256() const { return m_expectedSha256; }
+
+    //!< @brief Return detached signature URL.
+    QString signatureUrl() const { return m_signatureUrl; }
+
     //!< @brief Return download progress.
     qreal downloadProgress() const { return m_downloadProgress; }
 
@@ -203,6 +224,27 @@ public:
 
     //!< @brief Whether a download is ready.
     bool downloadReady() const { return !m_downloadedPath.isEmpty(); }
+
+    //!< @brief Return signature-required policy.
+    bool requireSignature() const { return m_requireSignature; }
+
+    /**
+     * @brief Set signature-required policy.
+     * @param enabled Toggle.
+     */
+    void setRequireSignature(bool enabled);
+
+    //!< @brief Return public key path.
+    QString publicKeyPath() const { return m_publicKeyPath; }
+
+    /**
+     * @brief Set public key path.
+     * @param path Absolute or local filesystem path.
+     */
+    void setPublicKeyPath(const QString& path);
+
+    //!< @brief Return signature verification result for current payload.
+    bool signatureVerified() const { return m_signatureVerified; }
 
     /**
      * @brief Trigger an immediate update check.
@@ -266,6 +308,15 @@ signals:
     //!< @brief Emitted when error changes.
     void lastErrorChanged();
 
+    //!< @brief Emitted when signature policy changes.
+    void signaturePolicyChanged();
+
+    //!< @brief Emitted when public key path changes.
+    void publicKeyPathChanged();
+
+    //!< @brief Emitted when signature verification state changes.
+    void signatureVerificationChanged();
+
 private:
     //!< @brief Load settings from persistent store.
     void loadSettings();
@@ -316,6 +367,24 @@ private:
     //!< @brief Choose target filename for download.
     QString pickFileNameFromUrl(const QString& url) const;
 
+    //!< @brief Return asset metadata object matching selected URL.
+    QJsonObject assetByUrl(const QJsonArray& assets, const QString& url) const;
+
+    //!< @brief Return best matching sidecar asset URL by suffix.
+    QString sidecarAssetUrl(const QJsonArray& assets, const QString& baseName, const QStringList& suffixes) const;
+
+    //!< @brief Compute SHA-256 hash for a file path.
+    QString sha256ForFile(const QString& path) const;
+
+    //!< @brief Verify detached signature using OpenSSL.
+    bool verifySignatureWithOpenSsl(const QString& payloadPath,
+                                    const QString& signaturePath,
+                                    const QString& publicKeyPath,
+                                    QString* errorOut) const;
+
+    //!< @brief Verify checksum and optional signature for a payload.
+    bool verifyDownloadedPayload(const QString& payloadPath, QString* errorOut);
+
     QString m_currentVersion;                                //!< Current app version.
     QString m_channel = QStringLiteral("stable");            //!< Update channel.
     bool m_autoCheck = true;                                 //!< Auto-check toggle.
@@ -328,10 +397,15 @@ private:
     QString m_latestVersion;                                 //!< Latest version string.
     QString m_releaseNotes;                                  //!< Release notes.
     QString m_downloadUrl;                                   //!< Download URL.
+    QString m_expectedSha256;                                //!< Expected SHA-256.
+    QString m_signatureUrl;                                  //!< Detached signature URL.
     qreal m_downloadProgress = 0.0;                          //!< Download progress.
     QString m_downloadedPath;                                //!< Downloaded file path.
     QString m_status;                                        //!< Status message.
     QString m_lastError;                                     //!< Last error message.
+    bool m_requireSignature = false;                         //!< Require signature verification.
+    QString m_publicKeyPath;                                 //!< Signature public key path.
+    bool m_signatureVerified = false;                        //!< Last signature verify result.
 
     QNetworkAccessManager m_net;                             //!< Network access manager.
     QNetworkReply* m_activeReply = nullptr;                  //!< Active check reply.

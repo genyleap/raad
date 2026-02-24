@@ -1,5 +1,6 @@
 module;
 #include <algorithm>
+#include <QDir>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -11,6 +12,10 @@ module;
 #include <QPointer>
 #include <QSslError>
 #include <QNetworkProxy>
+#include <QRegularExpression>
+#include <QStorageInfo>
+#include <QElapsedTimer>
+#include <ctime>
 
 module raad.core.downloadertask;
 
@@ -32,6 +37,9 @@ DownloaderTask::DownloaderTask(const QUrl& url,
     m_filePath = utils::normalizeFilePath(m_filePath);
     m_singleTempPath = m_filePath + ".part";
     m_checksumState = QStringLiteral("None");
+    m_adaptiveTarget = qBound(1, m_segments, 32);
+    clearErrorState();
+    resetAdaptiveStats();
     resetNetworkManager();
 }
 
@@ -58,6 +66,10 @@ QUrl DownloaderTask::currentUrl() const
 
 void DownloaderTask::applyNetworkOptions(QNetworkRequest& req) const
 {
+    const QString ua = m_userAgent.trimmed();
+    if (!ua.isEmpty() && !req.hasRawHeader("User-Agent")) {
+        req.setRawHeader("User-Agent", ua.toUtf8());
+    }
     if (!m_cookieHeader.isEmpty()) {
         req.setRawHeader("Cookie", m_cookieHeader.toUtf8());
     }
@@ -289,6 +301,371 @@ void DownloaderTask::setProxyPassword(const QString& value)
     emit networkOptionsChanged();
 }
 
+void DownloaderTask::setUserAgent(const QString& value)
+{
+    const QString next = value.trimmed().isEmpty()
+        ? QStringLiteral("raad/1.0")
+        : value.trimmed();
+    if (m_userAgent == next) return;
+    m_userAgent = next;
+    emit networkOptionsChanged();
+}
+
+void DownloaderTask::setAllowInsecureSsl(bool enabled)
+{
+    if (m_allowInsecureSsl == enabled) return;
+    m_allowInsecureSsl = enabled;
+    emit networkOptionsChanged();
+}
+
+void DownloaderTask::setPriority(int value)
+{
+    const int next = qBound(0, value, 1000);
+    if (m_priority == next) return;
+    m_priority = next;
+    emit priorityChanged();
+}
+
+void DownloaderTask::setAdaptiveSegmentsEnabled(bool enabled)
+{
+    if (m_adaptiveSegmentsEnabled == enabled) return;
+    m_adaptiveSegmentsEnabled = enabled;
+    if (!enabled) {
+        m_parallelTarget = qBound(1, m_segments, 32);
+        m_adaptiveTarget = m_parallelTarget;
+        resetAdaptiveStats();
+    }
+    emit adaptiveSegmentsChanged();
+}
+
+void DownloaderTask::sampleWriteLatency(qint64 elapsedMs)
+{
+    if (elapsedMs <= 0) return;
+    const qreal previous = m_adaptiveWriteLatencyMs;
+    if (m_adaptiveWriteSamples == 0) {
+        m_adaptiveWriteLatencyMs = static_cast<qreal>(elapsedMs);
+    } else {
+        constexpr qreal kAlpha = 0.2;
+        m_adaptiveWriteLatencyMs =
+            (1.0 - kAlpha) * m_adaptiveWriteLatencyMs + kAlpha * static_cast<qreal>(elapsedMs);
+    }
+    m_adaptiveWriteSamples = qMin(m_adaptiveWriteSamples + 1, 5000);
+    if (qAbs(m_adaptiveWriteLatencyMs - previous) >= 0.25) {
+        emit adaptiveMetricsChanged();
+    }
+}
+
+void DownloaderTask::sampleCpuLoad()
+{
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const qint64 nowTicks = static_cast<qint64>(std::clock());
+    if (nowTicks <= 0) {
+        m_adaptiveCpuLastWallMs = nowMs;
+        m_adaptiveCpuLastClockTicks = 0;
+        return;
+    }
+
+    if (m_adaptiveCpuLastWallMs <= 0 || m_adaptiveCpuLastClockTicks <= 0) {
+        m_adaptiveCpuLastWallMs = nowMs;
+        m_adaptiveCpuLastClockTicks = nowTicks;
+        return;
+    }
+
+    const qint64 wallDeltaMs = nowMs - m_adaptiveCpuLastWallMs;
+    const qint64 tickDelta = nowTicks - m_adaptiveCpuLastClockTicks;
+    m_adaptiveCpuLastWallMs = nowMs;
+    m_adaptiveCpuLastClockTicks = nowTicks;
+    if (wallDeltaMs < 300 || tickDelta <= 0) return;
+
+    const qreal cpuSeconds = static_cast<qreal>(tickDelta) / static_cast<qreal>(CLOCKS_PER_SEC);
+    const qreal wallSeconds = static_cast<qreal>(wallDeltaMs) / 1000.0;
+    const qreal cores = static_cast<qreal>(qMax(1, QThread::idealThreadCount()));
+    qreal usagePct = 0.0;
+    if (wallSeconds > 0.0 && cores > 0.0) {
+        usagePct = (cpuSeconds / (wallSeconds * cores)) * 100.0;
+    }
+    usagePct = qBound<qreal>(0.0, usagePct, 100.0);
+
+    const qreal previous = m_adaptiveCpuLoadPct;
+    constexpr qreal kAlpha = 0.18;
+    if (m_adaptiveCpuSamples == 0) {
+        m_adaptiveCpuLoadPct = usagePct;
+    } else {
+        m_adaptiveCpuLoadPct = (1.0 - kAlpha) * m_adaptiveCpuLoadPct + kAlpha * usagePct;
+    }
+    m_adaptiveCpuSamples = qMin(m_adaptiveCpuSamples + 1, 5000);
+    if (qAbs(m_adaptiveCpuLoadPct - previous) >= 1.0) {
+        emit adaptiveMetricsChanged();
+    }
+}
+
+void DownloaderTask::sampleNetworkRead(qint64 bytes)
+{
+    if (bytes <= 0) return;
+    m_adaptiveReadEvents = qMin<qint64>(1000000, m_adaptiveReadEvents + 1);
+    const qint64 total = m_adaptiveReadEvents + m_adaptiveErrorEvents;
+    if (total > 0) {
+        const qreal prev = m_adaptivePacketLossRate;
+        m_adaptivePacketLossRate = static_cast<qreal>(m_adaptiveErrorEvents) / static_cast<qreal>(total);
+        if (qAbs(m_adaptivePacketLossRate - prev) >= 0.005) {
+            emit adaptiveMetricsChanged();
+        }
+    }
+}
+
+void DownloaderTask::sampleNetworkError(QNetworkReply::NetworkError err)
+{
+    if (err == QNetworkReply::NoError || err == QNetworkReply::OperationCanceledError) {
+        return;
+    }
+
+    m_adaptiveErrorEvents = qMin<qint64>(1000000, m_adaptiveErrorEvents + 1);
+    switch (err) {
+    case QNetworkReply::TimeoutError:
+    case QNetworkReply::RemoteHostClosedError:
+    case QNetworkReply::TemporaryNetworkFailureError:
+    case QNetworkReply::NetworkSessionFailedError:
+    case QNetworkReply::ProxyConnectionRefusedError:
+    case QNetworkReply::ProxyTimeoutError:
+    case QNetworkReply::ConnectionRefusedError:
+    case QNetworkReply::SslHandshakeFailedError:
+        m_adaptivePacketLossHints = qMin(m_adaptivePacketLossHints + 1, 100);
+        break;
+    default:
+        break;
+    }
+
+    const qint64 total = m_adaptiveReadEvents + m_adaptiveErrorEvents;
+    if (total > 0) {
+        const qreal prev = m_adaptivePacketLossRate;
+        m_adaptivePacketLossRate = static_cast<qreal>(m_adaptiveErrorEvents) / static_cast<qreal>(total);
+        if (qAbs(m_adaptivePacketLossRate - prev) >= 0.005) {
+            emit adaptiveMetricsChanged();
+        }
+    }
+}
+
+void DownloaderTask::resetAdaptiveStats()
+{
+    m_adaptiveErrors = 0;
+    m_adaptiveThrottleHits = 0;
+    m_adaptiveServerThrottleHints = 0;
+    m_adaptiveWriteLatencyMs = 0.0;
+    m_adaptiveCpuLoadPct = 0.0;
+    m_adaptivePacketLossRate = 0.0;
+    m_adaptiveWriteSamples = 0;
+    m_adaptiveCpuSamples = 0;
+    m_adaptivePacketLossHints = 0;
+    m_adaptiveReadEvents = 0;
+    m_adaptiveErrorEvents = 0;
+    m_adaptiveCpuLastClockTicks = static_cast<qint64>(std::clock());
+    m_adaptiveCpuLastWallMs = QDateTime::currentMSecsSinceEpoch();
+    m_adaptiveLastEvalMs = QDateTime::currentMSecsSinceEpoch();
+    emit adaptiveMetricsChanged();
+}
+
+int DownloaderTask::recommendedAdaptiveTarget() const
+{
+    if (!m_adaptiveSegmentsEnabled) {
+        return qBound(1, m_segments, 32);
+    }
+    if (!m_serverSupportsRange || !m_useRange) {
+        return 1;
+    }
+
+    int target = 6;
+    const qint64 speedBps = qMax<qint64>(0, m_speed);
+    if (speedBps >= 8 * 1024 * 1024) target = 10;
+    if (speedBps >= 20 * 1024 * 1024) target = 14;
+    if (speedBps >= 50 * 1024 * 1024) target = 20;
+    if (speedBps >= 120 * 1024 * 1024) target = 28;
+
+    if (m_totalSize > 0 && m_totalSize < (64ll * 1024 * 1024)) {
+        target = qMin(target, 8);
+    }
+
+    if (m_adaptiveCpuSamples > 4) {
+        if (m_adaptiveCpuLoadPct > 80.0) {
+            target -= 8;
+        } else if (m_adaptiveCpuLoadPct > 60.0) {
+            target -= 4;
+        }
+    }
+
+    if (m_adaptiveWriteSamples > 8) {
+        if (m_adaptiveWriteLatencyMs > 18.0) {
+            target -= 8;
+        } else if (m_adaptiveWriteLatencyMs > 10.0) {
+            target -= 4;
+        }
+    }
+    if (m_adaptiveThrottleHits > 6) {
+        target -= 2;
+    }
+    if (m_adaptiveErrors > 1) {
+        target -= 4;
+    }
+    if (m_adaptiveServerThrottleHints > 0) {
+        target -= 4;
+    }
+    if (m_adaptivePacketLossHints > 2 || m_adaptivePacketLossRate > 0.08) {
+        target -= 6;
+    } else if (m_adaptivePacketLossRate > 0.03) {
+        target -= 3;
+    }
+
+    target = qBound(4, target, 32);
+    return target;
+}
+
+void DownloaderTask::evaluateAdaptiveSegments()
+{
+    if (!m_adaptiveSegmentsEnabled || m_state != State::Downloading) return;
+    if (!m_serverSupportsRange || !m_useRange) return;
+
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (m_adaptiveLastEvalMs > 0 && nowMs - m_adaptiveLastEvalMs < 3000) return;
+    m_adaptiveLastEvalMs = nowMs;
+    sampleCpuLoad();
+
+    const int nextTarget = recommendedAdaptiveTarget();
+    if (nextTarget != m_adaptiveTarget) {
+        m_adaptiveTarget = nextTarget;
+        emit adaptiveSegmentsChanged();
+    }
+    if (nextTarget != m_parallelTarget) {
+        m_parallelTarget = qBound(1, nextTarget, 32);
+    }
+
+    // Decay counters to react quickly but avoid oscillation.
+    m_adaptiveErrors = qMax(0, m_adaptiveErrors - 1);
+    m_adaptiveThrottleHits = qMax(0, m_adaptiveThrottleHits - 2);
+    m_adaptiveServerThrottleHints = qMax(0, m_adaptiveServerThrottleHints - 1);
+    m_adaptivePacketLossHints = qMax(0, m_adaptivePacketLossHints - 1);
+}
+
+bool DownloaderTask::ensureOutputWritable(QString* why) const
+{
+    const QString outPath = utils::normalizeFilePath(m_filePath);
+    if (outPath.isEmpty()) {
+        if (why) *why = QStringLiteral("Empty output path");
+        return false;
+    }
+
+    const QFileInfo info(outPath);
+    const QString dirPath = info.absolutePath();
+    if (dirPath.isEmpty()) {
+        if (why) *why = QStringLiteral("Invalid output directory");
+        return false;
+    }
+    QDir dir(dirPath);
+    if (!dir.exists() && !QDir().mkpath(dirPath)) {
+        if (why) *why = QStringLiteral("Cannot create output directory");
+        return false;
+    }
+    const QFileInfo dirInfo(dirPath);
+    if (!dirInfo.isWritable()) {
+        if (why) *why = QStringLiteral("Output directory is not writable");
+        return false;
+    }
+    return true;
+}
+
+bool DownloaderTask::ensureDiskCapacity(qint64 totalSizeBytes, qint64 alreadyHaveBytes, QString* why) const
+{
+    if (totalSizeBytes <= 0) return true;
+    const qint64 remaining = qMax<qint64>(0, totalSizeBytes - qMax<qint64>(0, alreadyHaveBytes));
+    if (remaining <= 0) return true;
+
+    const QString outPath = utils::normalizeFilePath(m_filePath);
+    QStorageInfo storage(QFileInfo(outPath).absolutePath());
+    if (!storage.isValid() || !storage.isReady()) {
+        if (why) *why = QStringLiteral("Storage info unavailable");
+        return false;
+    }
+    const qint64 reserve = 64ll * 1024 * 1024;
+    const qint64 needed = remaining + reserve;
+    if (storage.bytesAvailable() < needed) {
+        if (why) {
+            *why = QStringLiteral("Insufficient free space (%1 MB required)")
+                       .arg(static_cast<qlonglong>(needed / (1024 * 1024)));
+        }
+        return false;
+    }
+    return true;
+}
+
+qint64 DownloaderTask::parseContentRangeStart(const QByteArray& contentRange) const
+{
+    const QString value = QString::fromUtf8(contentRange).trimmed();
+    if (value.isEmpty()) return -1;
+    QRegularExpression re(QStringLiteral("^bytes\\s+(\\d+)-\\d+/\\d+|^bytes\\s+(\\d+)-\\d+/\\*$"),
+                          QRegularExpression::CaseInsensitiveOption);
+    const QRegularExpressionMatch match = re.match(value);
+    if (!match.hasMatch()) return -1;
+    QString cap = match.captured(1);
+    if (cap.isEmpty()) cap = match.captured(2);
+    bool ok = false;
+    const qint64 start = cap.toLongLong(&ok);
+    return ok ? start : -1;
+}
+
+void DownloaderTask::recordError(const QString& category,
+                                 const QString& code,
+                                 const QString& message,
+                                 int httpStatus,
+                                 int networkError)
+{
+    bool changed = false;
+    if (m_errorCategory != category) {
+        m_errorCategory = category;
+        changed = true;
+    }
+    if (m_errorCode != code) {
+        m_errorCode = code;
+        changed = true;
+    }
+    if (m_errorMessage != message) {
+        m_errorMessage = message;
+        changed = true;
+    }
+    if (httpStatus > 0 && m_lastHttpStatus != httpStatus) {
+        m_lastHttpStatus = httpStatus;
+        changed = true;
+    }
+    if (networkError >= 0 && m_lastNetworkError != networkError) {
+        m_lastNetworkError = networkError;
+        changed = true;
+    }
+    if (changed) emit errorStateChanged();
+}
+
+void DownloaderTask::clearErrorState()
+{
+    bool changed = false;
+    if (!m_errorCategory.isEmpty()) {
+        m_errorCategory.clear();
+        changed = true;
+    }
+    if (!m_errorCode.isEmpty()) {
+        m_errorCode.clear();
+        changed = true;
+    }
+    if (!m_errorMessage.isEmpty()) {
+        m_errorMessage.clear();
+        changed = true;
+    }
+    if (m_lastHttpStatus != 0) {
+        m_lastHttpStatus = 0;
+        changed = true;
+    }
+    if (m_lastNetworkError != -1) {
+        m_lastNetworkError = -1;
+        changed = true;
+    }
+    if (changed) emit errorStateChanged();
+}
+
 void DownloaderTask::start()
 {
     if (m_state != State::Idle)
@@ -301,6 +678,20 @@ void DownloaderTask::start()
     if (m_pausedAt != 0) {
         m_pausedAt = 0;
         emit pausedAtChanged();
+    }
+    clearErrorState();
+    resetAdaptiveStats();
+
+    QString safetyError;
+    if (!ensureOutputWritable(&safetyError)) {
+        m_anyError = true;
+        recordError(QStringLiteral("disk"),
+                    QStringLiteral("output_not_writable"),
+                    safetyError);
+        m_state = State::Finished;
+        emit stateChanged();
+        emit finished(false);
+        return;
     }
 
     const bool hasExistingFile = QFile::exists(m_filePath) && QFileInfo(m_filePath).size() > 0;
@@ -323,6 +714,9 @@ void DownloaderTask::start()
     const QUrl activeUrl = currentUrl();
     if (!activeUrl.isValid()) {
         m_anyError = true;
+        recordError(QStringLiteral("network"),
+                    QStringLiteral("invalid_url"),
+                    QStringLiteral("Download URL is invalid"));
         m_state = State::Finished;
         emit stateChanged();
         emit finished(false);
@@ -337,7 +731,6 @@ void DownloaderTask::start()
     QNetworkRequest headReq(activeUrl);
     headReq.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
-    headReq.setRawHeader("User-Agent", "raad/1.0");
     applyNetworkOptions(headReq);
     if (m_headReply) {
         QPointer<QNetworkReply> oldHead = m_headReply;
@@ -355,12 +748,20 @@ void DownloaderTask::start()
     connect(headReply, &QNetworkReply::errorOccurred, this, [this, headReply](QNetworkReply::NetworkError err) {
         if (err == QNetworkReply::OperationCanceledError || m_state == State::Paused || m_state == State::Canceled)
             return;
+        m_adaptiveErrors = qMin(m_adaptiveErrors + 1, 100);
+        sampleNetworkError(err);
+        m_lastNetworkError = static_cast<int>(err);
+        emit errorStateChanged();
         qWarning() << "HEAD error:" << headReply->errorString();
         appendLog(QStringLiteral("HEAD error: %1").arg(headReply->errorString()));
     });
 #if QT_CONFIG(ssl)
-    connect(headReply, &QNetworkReply::sslErrors, this, [](const QList<QSslError>& errors) {
+    connect(headReply, &QNetworkReply::sslErrors, this, [this, headReply](const QList<QSslError>& errors) {
         qWarning() << "HEAD SSL errors:" << errors;
+        if (m_allowInsecureSsl && headReply) {
+            headReply->ignoreSslErrors(errors);
+            appendLog(QStringLiteral("HEAD SSL errors ignored by policy"));
+        }
     });
 #endif
 
@@ -373,6 +774,8 @@ void DownloaderTask::start()
         if (headReply->error() != QNetworkReply::NoError) {
             qDebug() << "HEAD failed, fallback to single stream:" << headReply->errorString();
             appendLog(QStringLiteral("HEAD failed, fallback to single stream"));
+            m_adaptiveErrors = qMin(m_adaptiveErrors + 1, 100);
+            sampleNetworkError(headReply->error());
             headReply->deleteLater();
             m_totalSize = 0;
             m_useRange = true;
@@ -390,6 +793,14 @@ void DownloaderTask::start()
         }
         QVariant cl = headReply->header(QNetworkRequest::ContentLengthHeader);
         QByteArray acceptRanges = headReply->rawHeader("Accept-Ranges");
+        const int statusCode = headReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (statusCode > 0) {
+            m_lastHttpStatus = statusCode;
+            emit errorStateChanged();
+            if (statusCode == 429 || statusCode == 503 || statusCode == 504) {
+                m_adaptiveServerThrottleHints = qMin(m_adaptiveServerThrottleHints + 1, 100);
+            }
+        }
         headReply->deleteLater();
 
         if (!cl.isValid() || cl.toLongLong() <= 0) {
@@ -402,12 +813,29 @@ void DownloaderTask::start()
         }
 
         m_totalSize = cl.toLongLong();
+        QString localSafetyError;
+        if (!ensureDiskCapacity(m_totalSize, utils::bytesReceivedOnDisk(m_filePath, m_segments), &localSafetyError)) {
+            m_anyError = true;
+            recordError(QStringLiteral("disk"),
+                        QStringLiteral("insufficient_space"),
+                        localSafetyError);
+            m_state = State::Finished;
+            emit stateChanged();
+            emit finished(false);
+            return;
+        }
         if (acceptRanges.toLower() != "bytes") {
             qDebug() << "Server does not support ranges";
             m_useRange = false;
             m_serverSupportsRange = false;
         } else {
             m_serverSupportsRange = true;
+        }
+
+        if (m_adaptiveSegmentsEnabled) {
+            m_parallelTarget = qBound(4, m_segments, 32);
+            m_adaptiveTarget = m_parallelTarget;
+            emit adaptiveSegmentsChanged();
         }
 
         if (!m_useRange || m_segments == 1) {
@@ -478,7 +906,6 @@ void DownloaderTask::startSingleStream(bool resume)
     QNetworkRequest req(currentUrl());
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                      QNetworkRequest::NoLessSafeRedirectPolicy);
-    req.setRawHeader("User-Agent", "raad/1.0");
 
     if (m_singleReply) {
         QPointer<QNetworkReply> oldReply = m_singleReply;
@@ -521,6 +948,17 @@ void DownloaderTask::startSingleStream(bool resume)
             m_resumeSingle = false;
         }
     }
+    QString spaceError;
+    if (!ensureDiskCapacity(m_totalSize, existingSize, &spaceError)) {
+        m_anyError = true;
+        recordError(QStringLiteral("disk"),
+                    QStringLiteral("insufficient_space"),
+                    spaceError);
+        m_state = State::Finished;
+        emit stateChanged();
+        emit finished(false);
+        return;
+    }
 
     m_singleFile = new QFile(m_singleTempPath);
     QIODevice::OpenMode mode = QIODevice::WriteOnly | (m_resumeSingle ? QIODevice::Append : QIODevice::Truncate);
@@ -528,6 +966,9 @@ void DownloaderTask::startSingleStream(bool resume)
         qWarning() << "Cannot open output file" << m_singleTempPath;
         delete m_singleFile; m_singleFile = nullptr;
         m_anyError = true;
+        recordError(QStringLiteral("disk"),
+                    QStringLiteral("open_failed"),
+                    QStringLiteral("Cannot open output file: %1").arg(m_singleTempPath));
         m_state = State::Finished;
         emit stateChanged();
         emit finished(false);
@@ -544,6 +985,13 @@ void DownloaderTask::startSingleStream(bool resume)
     connect(reply, &QNetworkReply::metaDataChanged, this, [this, replyPtr, existingSize]() {
         if (!replyPtr || replyPtr != m_singleReply) return;
         int status = replyPtr->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (status > 0 && status != m_lastHttpStatus) {
+            m_lastHttpStatus = status;
+            emit errorStateChanged();
+        }
+        if (status == 429 || status == 503 || status == 504) {
+            m_adaptiveServerThrottleHints = qMin(m_adaptiveServerThrottleHints + 1, 100);
+        }
         const QByteArray etag = replyPtr->rawHeader("ETag");
         if (!etag.isEmpty()) {
             m_etag = QString::fromUtf8(etag);
@@ -554,6 +1002,21 @@ void DownloaderTask::startSingleStream(bool resume)
         }
         if (status == 206) {
             m_serverSupportsRange = true;
+            if (m_resumeSingle && existingSize > 0) {
+                const qint64 start = parseContentRangeStart(replyPtr->rawHeader("Content-Range"));
+                if (start >= 0 && start != existingSize) {
+                    if (m_singleFile) {
+                        m_singleFile->close();
+                        if (!m_singleFile->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                            qWarning() << "Cannot reopen output file for resume reset" << m_singleTempPath;
+                        }
+                    }
+                    m_resumeSingle = false;
+                    m_singleWritten = 0;
+                    setResumeWarning(QStringLiteral("Resume mismatch; restarted"));
+                    appendLog(QStringLiteral("Resume mismatch (Content-Range start mismatch); restarted"));
+                }
+            }
         } else if (status == 200) {
             m_serverSupportsRange = false;
         }
@@ -575,6 +1038,10 @@ void DownloaderTask::startSingleStream(bool resume)
             m_singleWritten = 0;
             setResumeWarning(QStringLiteral("Resume rejected; restarting"));
             appendLog(QStringLiteral("Resume rejected; restarting from 0"));
+            recordError(QStringLiteral("network"),
+                        QStringLiteral("resume_rejected"),
+                        QStringLiteral("Resume request rejected by server"),
+                        status);
             QTimer::singleShot(0, this, [this] {
                 if (m_state == State::Downloading) startSingleStream(false);
             });
@@ -594,24 +1061,42 @@ void DownloaderTask::startSingleStream(bool resume)
                 appendLog(QStringLiteral("Resume not supported; restarted"));
             }
         }
+        if (status >= 400) {
+            recordError(QStringLiteral("network"),
+                        QStringLiteral("http_status"),
+                        QStringLiteral("HTTP status %1").arg(status),
+                        status);
+        }
     });
 
     connect(reply, &QNetworkReply::errorOccurred, this, [this, replyPtr](QNetworkReply::NetworkError err) {
         if (err == QNetworkReply::OperationCanceledError || m_state == State::Paused || m_state == State::Canceled)
             return;
         if (!replyPtr) return;
+        m_adaptiveErrors = qMin(m_adaptiveErrors + 1, 100);
+        sampleNetworkError(err);
+        recordError(QStringLiteral("network"),
+                    QStringLiteral("network_error"),
+                    replyPtr->errorString(),
+                    0,
+                    static_cast<int>(err));
         qWarning() << "GET error:" << replyPtr->errorString();
         appendLog(QStringLiteral("GET error: %1").arg(replyPtr->errorString()));
     });
 #if QT_CONFIG(ssl)
-    connect(reply, &QNetworkReply::sslErrors, this, [](const QList<QSslError>& errors) {
+    connect(reply, &QNetworkReply::sslErrors, this, [this, reply](const QList<QSslError>& errors) {
         qWarning() << "GET SSL errors:" << errors;
+        if (m_allowInsecureSsl && reply) {
+            reply->ignoreSslErrors(errors);
+            appendLog(QStringLiteral("GET SSL errors ignored by policy"));
+        }
     });
 #endif
 
     connect(reply, &QNetworkReply::readyRead, this, [this, replyPtr]() mutable {
         if (!replyPtr || replyPtr != m_singleReply) return;
         QByteArray data = replyPtr->readAll();
+        sampleNetworkRead(data.size());
         // append to single buffer
         m_singleBuffer.append(data);
 
@@ -627,6 +1112,11 @@ void DownloaderTask::startSingleStream(bool resume)
         }
         if (m_state == State::Downloading && replyPtr->error() != QNetworkReply::NoError) {
             m_anyError = true;
+            recordError(QStringLiteral("network"),
+                        QStringLiteral("download_failed"),
+                        replyPtr->errorString(),
+                        replyPtr->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt(),
+                        static_cast<int>(replyPtr->error()));
         }
 
         // ensure buffer fully processed
@@ -635,9 +1125,15 @@ void DownloaderTask::startSingleStream(bool resume)
         // Final drain after network close: flush any buffered bytes regardless of throttle.
         if (m_singleFile && !m_singleBuffer.isEmpty()) {
             while (!m_singleBuffer.isEmpty()) {
+                QElapsedTimer writeTimer;
+                writeTimer.start();
                 const qint64 written = m_singleFile->write(m_singleBuffer.constData(), m_singleBuffer.size());
+                sampleWriteLatency(writeTimer.elapsed());
                 if (written <= 0) {
                     m_anyError = true;
+                    recordError(QStringLiteral("disk"),
+                                QStringLiteral("write_failed"),
+                                QStringLiteral("Failed writing output buffer"));
                     break;
                 }
                 m_singleBuffer.remove(0, written);
@@ -689,17 +1185,25 @@ void DownloaderTask::processSingleBuffer()
     qint64 allowed = (m_maxSpeed > 0) ? (m_maxSpeed * elapsedMs / 1000 - m_throttleBytes) : m_singleBuffer.size();
 
     if (allowed <= 0) {
+        m_adaptiveThrottleHits = qMin(m_adaptiveThrottleHits + 1, 100);
         // schedule later
         QTimer::singleShot(50, this, [this]{ m_singleProcessing = false; processSingleBuffer(); });
         return;
     }
 
     qint64 toWrite = qMin<qint64>(allowed, m_singleBuffer.size());
+    QElapsedTimer writeTimer;
+    writeTimer.start();
     qint64 written = m_singleFile->write(m_singleBuffer.constData(), toWrite);
+    sampleWriteLatency(writeTimer.elapsed());
     if (written > 0) {
         m_singleBuffer.remove(0, written);
         m_throttleBytes += written;
         m_singleWritten += written;
+    } else if (written < 0) {
+        recordError(QStringLiteral("disk"),
+                    QStringLiteral("write_failed"),
+                    QStringLiteral("Failed writing output buffer"));
     }
 
     // reset throttle window if > 1000 ms
@@ -712,6 +1216,7 @@ void DownloaderTask::processSingleBuffer()
     qint64 totalDownloadedBytes = totalDownloaded();
     emit progress(totalDownloadedBytes, m_totalSize);
     updateSpeedAndETA();
+    evaluateAdaptiveSegments();
 
     m_singleProcessing = false;
 
@@ -733,6 +1238,9 @@ void DownloaderTask::startSegment(Segment* segment)
             delete segment->file;
             segment->file = nullptr;
             m_anyError = true;
+            recordError(QStringLiteral("disk"),
+                        QStringLiteral("open_failed"),
+                        QStringLiteral("Cannot open temporary segment file"));
             m_state = State::Finished;
             emit stateChanged();
             cleanup(false);
@@ -744,7 +1252,6 @@ void DownloaderTask::startSegment(Segment* segment)
     QNetworkRequest req(currentUrl());
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                      QNetworkRequest::NoLessSafeRedirectPolicy);
-    req.setRawHeader("User-Agent", "raad/1.0");
     req.setRawHeader(
         "Range",
         QString("bytes=%1-%2")
@@ -768,6 +1275,13 @@ void DownloaderTask::startSegment(Segment* segment)
         if (!replyPtr || replyPtr != segment->reply) return;
 
         const int status = replyPtr->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (status > 0 && status != m_lastHttpStatus) {
+            m_lastHttpStatus = status;
+            emit errorStateChanged();
+        }
+        if (status == 429 || status == 503 || status == 504) {
+            m_adaptiveServerThrottleHints = qMin(m_adaptiveServerThrottleHints + 1, 100);
+        }
         const QByteArray etag = replyPtr->rawHeader("ETag");
         if (!etag.isEmpty()) {
             m_etag = QString::fromUtf8(etag);
@@ -777,7 +1291,32 @@ void DownloaderTask::startSegment(Segment* segment)
             m_lastModified = QString::fromUtf8(lastMod);
         }
         if (status == 0) return; // not available yet
-        if (status == 206) return;
+        if (status == 206) {
+            if (segment->downloaded > 0) {
+                const qint64 expectedStart = segment->start + segment->downloaded;
+                const qint64 actualStart = parseContentRangeStart(replyPtr->rawHeader("Content-Range"));
+                if (actualStart >= 0 && actualStart != expectedStart) {
+                    qWarning() << "Content-Range mismatch, fallback to single stream";
+                    m_useRange = false;
+                    m_serverSupportsRange = false;
+                    m_adaptiveErrors = qMin(m_adaptiveErrors + 1, 100);
+                    setResumeWarning(QStringLiteral("Resume mismatch; switched to single stream"));
+                    appendLog(QStringLiteral("Segment resume mismatch; switched to single stream"));
+                    recordError(QStringLiteral("network"),
+                                QStringLiteral("resume_mismatch"),
+                                QStringLiteral("Segment Content-Range mismatch"),
+                                status);
+                    QTimer::singleShot(0, this, [this] {
+                        if (m_state != State::Downloading) return;
+                        m_effectiveSegments = 1;
+                        cleanup(false);
+                        startSingleStream(false);
+                    });
+                    return;
+                }
+            }
+            return;
+        }
 
         // If we're doing multi-segment, a non-206 usually means the server ignored Range.
         const bool isWholeFileRange = (segment->start == 0 && m_totalSize > 0 && segment->end == m_totalSize - 1);
@@ -789,8 +1328,13 @@ void DownloaderTask::startSegment(Segment* segment)
             qWarning() << "SEGMENT GET returned 200 (Range ignored), falling back to single stream";
             m_useRange = false;
             m_serverSupportsRange = false;
+            m_adaptiveServerThrottleHints = qMin(m_adaptiveServerThrottleHints + 1, 100);
             setResumeWarning(QStringLiteral("Range ignored; switched to single stream"));
             appendLog(QStringLiteral("Range ignored; switched to single stream"));
+            recordError(QStringLiteral("network"),
+                        QStringLiteral("range_ignored"),
+                        QStringLiteral("Server ignored Range header"),
+                        status);
             QTimer::singleShot(0, this, [this] {
                 if (m_state != State::Downloading) return;
                 m_effectiveSegments = 1;
@@ -802,24 +1346,40 @@ void DownloaderTask::startSegment(Segment* segment)
 
         if (status >= 400) {
             qWarning() << "SEGMENT GET HTTP error status" << status;
+            recordError(QStringLiteral("network"),
+                        QStringLiteral("http_status"),
+                        QStringLiteral("HTTP status %1").arg(status),
+                        status);
         }
     });
 
     connect(reply, &QNetworkReply::errorOccurred, this, [this, reply](QNetworkReply::NetworkError err) {
         if (err == QNetworkReply::OperationCanceledError || m_state == State::Paused || m_state == State::Canceled)
             return;
+        m_adaptiveErrors = qMin(m_adaptiveErrors + 1, 100);
+        sampleNetworkError(err);
+        recordError(QStringLiteral("network"),
+                    QStringLiteral("network_error"),
+                    reply->errorString(),
+                    0,
+                    static_cast<int>(err));
         qWarning() << "SEGMENT GET error:" << reply->errorString();
         appendLog(QStringLiteral("SEGMENT error: %1").arg(reply->errorString()));
     });
 #if QT_CONFIG(ssl)
-    connect(reply, &QNetworkReply::sslErrors, this, [](const QList<QSslError>& errors) {
+    connect(reply, &QNetworkReply::sslErrors, this, [this, reply](const QList<QSslError>& errors) {
         qWarning() << "SEGMENT GET SSL errors:" << errors;
+        if (m_allowInsecureSsl && reply) {
+            reply->ignoreSslErrors(errors);
+            appendLog(QStringLiteral("SEGMENT SSL errors ignored by policy"));
+        }
     });
 #endif
 
     connect(reply, &QNetworkReply::readyRead, this, [this, segment, replyPtr]() mutable {
         if (!replyPtr || replyPtr != segment->reply) return;
         QByteArray data = replyPtr->readAll();
+        sampleNetworkRead(data.size());
         // append to segment buffer
         segment->buffer.append(data);
 
@@ -835,6 +1395,11 @@ void DownloaderTask::startSegment(Segment* segment)
         }
         if (m_state == State::Downloading && segment->reply && segment->reply->error() != QNetworkReply::NoError) {
             m_anyError = true;
+            recordError(QStringLiteral("network"),
+                        QStringLiteral("download_failed"),
+                        segment->reply->errorString(),
+                        segment->reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt(),
+                        static_cast<int>(segment->reply->error()));
         }
         // ensure buffer fully processed later
         if (!segment->processing && segment->buffer.size() > 0) processSegmentBuffer(segment);
@@ -842,9 +1407,15 @@ void DownloaderTask::startSegment(Segment* segment)
         // Final drain after network close: flush any buffered bytes regardless of throttle.
         if (segment->file && !segment->buffer.isEmpty()) {
             while (!segment->buffer.isEmpty()) {
+                QElapsedTimer writeTimer;
+                writeTimer.start();
                 const qint64 written = segment->file->write(segment->buffer.constData(), segment->buffer.size());
+                sampleWriteLatency(writeTimer.elapsed());
                 if (written <= 0) {
                     m_anyError = true;
+                    recordError(QStringLiteral("disk"),
+                                QStringLiteral("write_failed"),
+                                QStringLiteral("Failed writing segment buffer"));
                     break;
                 }
                 segment->buffer.remove(0, written);
@@ -886,6 +1457,7 @@ void DownloaderTask::processSegmentBuffer(Segment* s)
     qint64 allowed = (m_maxSpeed > 0) ? (m_maxSpeed * elapsedMs / 1000 - m_throttleBytes) : s->buffer.size();
 
     if (allowed <= 0) {
+        m_adaptiveThrottleHits = qMin(m_adaptiveThrottleHits + 1, 100);
         // schedule for later
         s->processing = false;
         QTimer::singleShot(50, this, [this, s]{ processSegmentBuffer(s); });
@@ -893,11 +1465,18 @@ void DownloaderTask::processSegmentBuffer(Segment* s)
     }
 
     qint64 toWrite = qMin<qint64>(allowed, s->buffer.size());
+    QElapsedTimer writeTimer;
+    writeTimer.start();
     qint64 written = s->file->write(s->buffer.constData(), toWrite);
+    sampleWriteLatency(writeTimer.elapsed());
     if (written > 0) {
         s->buffer.remove(0, written);
         s->downloaded += written;
         m_throttleBytes += written;
+    } else if (written < 0) {
+        recordError(QStringLiteral("disk"),
+                    QStringLiteral("write_failed"),
+                    QStringLiteral("Failed writing segment buffer"));
     }
 
     // reset throttle window if >= 1000 ms
@@ -910,6 +1489,7 @@ void DownloaderTask::processSegmentBuffer(Segment* s)
     qint64 totalDownloadedBytes = totalDownloaded();
     emit progress(totalDownloadedBytes, m_totalSize);
     updateSpeedAndETA();
+    evaluateAdaptiveSegments();
 
     s->processing = false;
     const bool hasPending = !s->buffer.isEmpty();
@@ -1037,6 +1617,11 @@ void DownloaderTask::onSegmentFinished()
     }
 
     if (m_anyError) {
+        if (m_errorCode.isEmpty()) {
+            recordError(QStringLiteral("download"),
+                        QStringLiteral("segment_failed"),
+                        QStringLiteral("Segment download failed"));
+        }
         m_state = State::Finished;
         emit stateChanged();
         emit finished(false);
@@ -1045,6 +1630,9 @@ void DownloaderTask::onSegmentFinished()
 
     if (!mergeSegments()) {
         m_anyError = true;
+        recordError(QStringLiteral("disk"),
+                    QStringLiteral("merge_failed"),
+                    QStringLiteral("Failed to merge segment files"));
         m_state = State::Finished;
         emit stateChanged();
         emit finished(false);
@@ -1059,8 +1647,12 @@ void DownloaderTask::onSegmentFinished()
 bool DownloaderTask::mergeSegments()
 {
     QFile out(m_filePath);
-    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        recordError(QStringLiteral("disk"),
+                    QStringLiteral("merge_open_failed"),
+                    QStringLiteral("Cannot open output file for merge"));
         return false;
+    }
 
     QVector<const Segment*> ordered;
     ordered.reserve(m_segmentsInfo.size());
@@ -1075,6 +1667,9 @@ bool DownloaderTask::mergeSegments()
         if (!seg) continue;
         QFile part(seg->tempFilePath);
         if (!part.open(QIODevice::ReadOnly)) {
+            recordError(QStringLiteral("disk"),
+                        QStringLiteral("merge_part_missing"),
+                        QStringLiteral("Cannot open segment part: %1").arg(seg->tempFilePath));
             out.close();
             return false;
         }
@@ -1085,6 +1680,9 @@ bool DownloaderTask::mergeSegments()
             if (readBytes <= 0) break;
             qint64 written = out.write(buffer.constData(), readBytes);
             if (written != readBytes) {
+                recordError(QStringLiteral("disk"),
+                            QStringLiteral("merge_write_failed"),
+                            QStringLiteral("Failed while merging segments"));
                 part.close();
                 out.close();
                 return false;
@@ -1219,6 +1817,11 @@ void DownloaderTask::markError()
 
     // This is used for session restore; we don't emit finished() here.
     m_anyError = true;
+    if (m_errorCode.isEmpty()) {
+        recordError(QStringLiteral("download"),
+                    QStringLiteral("unknown"),
+                    QStringLiteral("Download failed"));
+    }
     m_state = State::Finished;
     emit stateChanged();
     m_speed = 0;
@@ -1238,6 +1841,7 @@ void DownloaderTask::markDone()
     if (m_state == State::Canceled)
         return;
     m_anyError = false;
+    clearErrorState();
     m_state = State::Finished;
     emit stateChanged();
     m_speed = 0;
@@ -1387,6 +1991,7 @@ void DownloaderTask::updateSpeedAndETA() {
         m_eta = -1;
         emit etaChanged(m_eta);
     }
+    evaluateAdaptiveSegments();
 }
 
 void DownloaderTask::restart()

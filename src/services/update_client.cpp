@@ -1,7 +1,9 @@
 module;
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDesktopServices>
 #include <QDir>
+#include <QEventLoop>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -12,6 +14,7 @@ module;
 #include <QProcess>
 #include <QStandardPaths>
 #include <QSysInfo>
+#include <QTemporaryFile>
 #include <QTimer>
 #include <QUrl>
 #include <QSettings>
@@ -98,6 +101,23 @@ void UpdateClient::setManifestUrl(const QString& url)
     emit manifestUrlChanged();
 }
 
+void UpdateClient::setRequireSignature(bool enabled)
+{
+    if (m_requireSignature == enabled) return;
+    m_requireSignature = enabled;
+    saveSettings();
+    emit signaturePolicyChanged();
+}
+
+void UpdateClient::setPublicKeyPath(const QString& path)
+{
+    const QString next = path.trimmed();
+    if (m_publicKeyPath == next) return;
+    m_publicKeyPath = next;
+    saveSettings();
+    emit publicKeyPathChanged();
+}
+
 void UpdateClient::checkNow()
 {
     if (m_activeReply) {
@@ -159,6 +179,10 @@ void UpdateClient::downloadUpdate()
     emit downloadProgressChanged();
     m_downloadedPath.clear();
     emit downloadReadyChanged();
+    if (m_signatureVerified) {
+        m_signatureVerified = false;
+        emit signatureVerificationChanged();
+    }
     setStatus(QStringLiteral("Downloading update..."));
 
     const QString fileName = pickFileNameFromUrl(m_downloadUrl);
@@ -216,6 +240,13 @@ void UpdateClient::downloadUpdate()
             m_downloadProgress = 1.0;
             emit downloadProgressChanged();
         }
+        QString verifyError;
+        if (!verifyDownloadedPayload(targetPath, &verifyError)) {
+            QFile::remove(targetPath);
+            setStatus(QStringLiteral("Verification failed"));
+            setError(verifyError.isEmpty() ? QStringLiteral("Downloaded payload verification failed") : verifyError);
+            return;
+        }
         m_downloadedPath = targetPath;
         emit downloadReadyChanged();
         setStatus(QStringLiteral("Update downloaded"));
@@ -226,6 +257,11 @@ void UpdateClient::installUpdate()
 {
     if (m_downloadedPath.isEmpty()) {
         setError(QStringLiteral("No downloaded update"));
+        return;
+    }
+    if (m_requireSignature && !m_signatureVerified) {
+        setError(QStringLiteral("Signature verification is required before install"));
+        setStatus(QStringLiteral("Verification required"));
         return;
     }
 
@@ -252,6 +288,8 @@ void UpdateClient::loadSettings()
     if (m_sourcePreference.isEmpty()) m_sourcePreference = QStringLiteral("auto");
     m_githubRepo = settings.value(QStringLiteral("githubRepo"), m_githubRepo).toString();
     m_manifestUrl = settings.value(QStringLiteral("manifestUrl"), m_manifestUrl).toString();
+    m_requireSignature = settings.value(QStringLiteral("requireSignature"), m_requireSignature).toBool();
+    m_publicKeyPath = settings.value(QStringLiteral("publicKeyPath"), m_publicKeyPath).toString();
     settings.endGroup();
 }
 
@@ -265,6 +303,8 @@ void UpdateClient::saveSettings()
     settings.setValue(QStringLiteral("sourcePreference"), m_sourcePreference);
     settings.setValue(QStringLiteral("githubRepo"), m_githubRepo);
     settings.setValue(QStringLiteral("manifestUrl"), m_manifestUrl);
+    settings.setValue(QStringLiteral("requireSignature"), m_requireSignature);
+    settings.setValue(QStringLiteral("publicKeyPath"), m_publicKeyPath);
     settings.endGroup();
 }
 
@@ -288,8 +328,14 @@ void UpdateClient::resetUpdateInfo()
     m_latestVersion.clear();
     m_releaseNotes.clear();
     m_downloadUrl.clear();
+    m_expectedSha256.clear();
+    m_signatureUrl.clear();
     m_downloadedPath.clear();
     m_downloadProgress = 0.0;
+    if (m_signatureVerified) {
+        m_signatureVerified = false;
+        emit signatureVerificationChanged();
+    }
     emit updateAvailableChanged();
     emit updateInfoChanged();
     emit downloadReadyChanged();
@@ -405,10 +451,28 @@ void UpdateClient::handleManifestJson(const QJsonDocument& doc)
         const QString notes = obj.value(QStringLiteral("notes")).toString();
         QJsonArray assets = obj.value(QStringLiteral("assets")).toArray();
         const QString assetUrl = selectAssetUrl(assets);
+        const QJsonObject assetObj = assetByUrl(assets, assetUrl);
+        QString expectedSha = assetObj.value(QStringLiteral("sha256")).toString().trimmed();
+        if (expectedSha.isEmpty()) expectedSha = assetObj.value(QStringLiteral("checksum")).toString().trimmed();
+        if (expectedSha.isEmpty()) expectedSha = assetObj.value(QStringLiteral("hash")).toString().trimmed();
+        if (expectedSha.startsWith(QStringLiteral("sha256:"), Qt::CaseInsensitive)) {
+            expectedSha = expectedSha.mid(QStringLiteral("sha256:").size()).trimmed();
+        }
+        QString signatureUrl = assetObj.value(QStringLiteral("signature")).toString().trimmed();
+        if (signatureUrl.isEmpty()) signatureUrl = assetObj.value(QStringLiteral("sig")).toString().trimmed();
+        if (signatureUrl.isEmpty()) signatureUrl = assetObj.value(QStringLiteral("signatureUrl")).toString().trimmed();
+        const QString baseName = !assetObj.value(QStringLiteral("name")).toString().isEmpty()
+            ? assetObj.value(QStringLiteral("name")).toString()
+            : utils::fileNameFromUrl(QUrl(assetUrl));
+        if (signatureUrl.isEmpty()) {
+            signatureUrl = sidecarAssetUrl(assets, baseName, {QStringLiteral(".sig"), QStringLiteral(".minisig"), QStringLiteral(".asc")});
+        }
 
         m_latestVersion = version;
         m_releaseNotes = notes;
         m_downloadUrl = assetUrl;
+        m_expectedSha256 = expectedSha;
+        m_signatureUrl = signatureUrl;
         emit updateInfoChanged();
 
         if (version.isEmpty() || assetUrl.isEmpty()) {
@@ -458,10 +522,28 @@ void UpdateClient::handleGitHubJson(const QJsonDocument& doc, bool allowPrerelea
     const QString notes = rel.value(QStringLiteral("body")).toString();
     const QJsonArray assets = rel.value(QStringLiteral("assets")).toArray();
     const QString assetUrl = selectAssetUrl(assets);
+    const QJsonObject assetObj = assetByUrl(assets, assetUrl);
+    QString expectedSha = assetObj.value(QStringLiteral("sha256")).toString().trimmed();
+    if (expectedSha.isEmpty()) expectedSha = assetObj.value(QStringLiteral("checksum")).toString().trimmed();
+    if (expectedSha.isEmpty()) expectedSha = assetObj.value(QStringLiteral("hash")).toString().trimmed();
+    if (expectedSha.startsWith(QStringLiteral("sha256:"), Qt::CaseInsensitive)) {
+        expectedSha = expectedSha.mid(QStringLiteral("sha256:").size()).trimmed();
+    }
+    QString signatureUrl = assetObj.value(QStringLiteral("signature")).toString().trimmed();
+    if (signatureUrl.isEmpty()) signatureUrl = assetObj.value(QStringLiteral("sig")).toString().trimmed();
+    if (signatureUrl.isEmpty()) signatureUrl = assetObj.value(QStringLiteral("signatureUrl")).toString().trimmed();
+    const QString baseName = !assetObj.value(QStringLiteral("name")).toString().isEmpty()
+        ? assetObj.value(QStringLiteral("name")).toString()
+        : utils::fileNameFromUrl(QUrl(assetUrl));
+    if (signatureUrl.isEmpty()) {
+        signatureUrl = sidecarAssetUrl(assets, baseName, {QStringLiteral(".sig"), QStringLiteral(".minisig"), QStringLiteral(".asc")});
+    }
 
     m_latestVersion = version;
     m_releaseNotes = notes;
     m_downloadUrl = assetUrl;
+    m_expectedSha256 = expectedSha;
+    m_signatureUrl = signatureUrl;
     emit updateInfoChanged();
 
     if (version.isEmpty() || assetUrl.isEmpty()) {
@@ -556,6 +638,14 @@ QString UpdateClient::selectAssetUrl(const QJsonArray& assets) const
         if (name.isEmpty()) name = obj.value(QStringLiteral("file")).toString();
         if (name.isEmpty() && !url.isEmpty()) name = utils::fileNameFromUrl(QUrl(url));
         if (url.isEmpty() || name.isEmpty()) continue;
+        const QString lowerName = name.toLower();
+        if (lowerName.endsWith(QStringLiteral(".sig")) ||
+            lowerName.endsWith(QStringLiteral(".asc")) ||
+            lowerName.endsWith(QStringLiteral(".minisig")) ||
+            lowerName.endsWith(QStringLiteral(".sha256")) ||
+            lowerName.endsWith(QStringLiteral(".sha512"))) {
+            continue;
+        }
         int score = scoreFor(name);
         if (score > bestScore) {
             bestScore = score;
@@ -570,4 +660,173 @@ QString UpdateClient::pickFileNameFromUrl(const QString& url) const
     const QString name = utils::fileNameFromUrl(QUrl(url));
     if (!name.isEmpty()) return name;
     return QStringLiteral("raad-update.bin");
+}
+
+QJsonObject UpdateClient::assetByUrl(const QJsonArray& assets, const QString& url) const
+{
+    if (url.isEmpty()) return QJsonObject();
+    for (const QJsonValue& v : assets) {
+        if (!v.isObject()) continue;
+        const QJsonObject obj = v.toObject();
+        QString candidate = obj.value(QStringLiteral("browser_download_url")).toString();
+        if (candidate.isEmpty()) candidate = obj.value(QStringLiteral("url")).toString();
+        if (candidate.isEmpty()) candidate = obj.value(QStringLiteral("downloadUrl")).toString();
+        if (candidate.isEmpty()) candidate = obj.value(QStringLiteral("href")).toString();
+        if (!candidate.isEmpty() && candidate == url) return obj;
+    }
+    return QJsonObject();
+}
+
+QString UpdateClient::sidecarAssetUrl(const QJsonArray& assets, const QString& baseName, const QStringList& suffixes) const
+{
+    const QString base = baseName.trimmed().toLower();
+    if (base.isEmpty()) return QString();
+    for (const QJsonValue& v : assets) {
+        if (!v.isObject()) continue;
+        const QJsonObject obj = v.toObject();
+        QString name = obj.value(QStringLiteral("name")).toString();
+        QString url = obj.value(QStringLiteral("browser_download_url")).toString();
+        if (url.isEmpty()) url = obj.value(QStringLiteral("url")).toString();
+        if (url.isEmpty()) url = obj.value(QStringLiteral("downloadUrl")).toString();
+        if (url.isEmpty()) url = obj.value(QStringLiteral("href")).toString();
+        if (name.isEmpty() && !url.isEmpty()) {
+            name = utils::fileNameFromUrl(QUrl(url));
+        }
+        if (name.isEmpty() || url.isEmpty()) continue;
+        const QString lower = name.toLower();
+        for (const QString& suffix : suffixes) {
+            const QString target = (base + suffix.toLower());
+            if (lower == target || lower.endsWith(target)) {
+                return url;
+            }
+        }
+    }
+    return QString();
+}
+
+QString UpdateClient::sha256ForFile(const QString& path) const
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return QString();
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    QByteArray buffer;
+    buffer.resize(1024 * 1024);
+    while (!file.atEnd()) {
+        const qint64 n = file.read(buffer.data(), buffer.size());
+        if (n <= 0) break;
+        hash.addData(QByteArrayView(buffer.constData(), static_cast<qsizetype>(n)));
+    }
+    file.close();
+    return QString::fromUtf8(hash.result().toHex()).toLower();
+}
+
+bool UpdateClient::verifySignatureWithOpenSsl(const QString& payloadPath,
+                                              const QString& signaturePath,
+                                              const QString& publicKeyPath,
+                                              QString* errorOut) const
+{
+    QProcess proc;
+    proc.start(QStringLiteral("openssl"),
+               QStringList()
+                   << QStringLiteral("dgst")
+                   << QStringLiteral("-sha256")
+                   << QStringLiteral("-verify")
+                   << publicKeyPath
+                   << QStringLiteral("-signature")
+                   << signaturePath
+                   << payloadPath);
+    if (!proc.waitForFinished(20000)) {
+        if (errorOut) *errorOut = QStringLiteral("OpenSSL verify timed out");
+        proc.kill();
+        return false;
+    }
+    const QString stdOut = QString::fromUtf8(proc.readAllStandardOutput());
+    const QString stdErr = QString::fromUtf8(proc.readAllStandardError());
+    if (proc.exitCode() != 0) {
+        if (errorOut) *errorOut = stdErr.isEmpty() ? QStringLiteral("OpenSSL verification failed") : stdErr.trimmed();
+        return false;
+    }
+    if (!stdOut.contains(QStringLiteral("Verified OK"), Qt::CaseInsensitive) &&
+        !stdErr.contains(QStringLiteral("Verified OK"), Qt::CaseInsensitive)) {
+        if (errorOut) *errorOut = QStringLiteral("Signature verification did not return success");
+        return false;
+    }
+    return true;
+}
+
+bool UpdateClient::verifyDownloadedPayload(const QString& payloadPath, QString* errorOut)
+{
+    const QString expected = utils::normalizeChecksum(m_expectedSha256);
+    if (!expected.isEmpty()) {
+        const QString actual = utils::normalizeChecksum(sha256ForFile(payloadPath));
+        if (actual.isEmpty()) {
+            if (errorOut) *errorOut = QStringLiteral("Failed to compute SHA-256");
+            return false;
+        }
+        if (actual != expected) {
+            if (errorOut) {
+                *errorOut = QStringLiteral("SHA-256 mismatch (expected %1, got %2)")
+                                .arg(expected, actual);
+            }
+            return false;
+        }
+    }
+
+    bool nextSignatureVerified = false;
+    if (m_requireSignature) {
+        if (m_publicKeyPath.trimmed().isEmpty()) {
+            if (errorOut) *errorOut = QStringLiteral("Public key path is required for signature verification");
+            return false;
+        }
+        if (m_signatureUrl.trimmed().isEmpty()) {
+            if (errorOut) *errorOut = QStringLiteral("Detached signature URL is required");
+            return false;
+        }
+        if (!QFile::exists(m_publicKeyPath)) {
+            if (errorOut) *errorOut = QStringLiteral("Public key file not found");
+            return false;
+        }
+
+        QNetworkRequest sigReq{QUrl(m_signatureUrl)};
+        sigReq.setRawHeader("User-Agent", "raad/1.0");
+        QNetworkReply* sigReply = m_net.get(sigReq);
+        QEventLoop loop;
+        connect(sigReply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+        loop.exec();
+
+        if (!sigReply || sigReply->error() != QNetworkReply::NoError) {
+            if (errorOut) *errorOut = QStringLiteral("Failed to fetch signature file");
+            if (sigReply) sigReply->deleteLater();
+            return false;
+        }
+
+        const QByteArray sigData = sigReply->readAll();
+        sigReply->deleteLater();
+        if (sigData.isEmpty()) {
+            if (errorOut) *errorOut = QStringLiteral("Signature file is empty");
+            return false;
+        }
+
+        QTemporaryFile sigTmp(QDir::tempPath() + QStringLiteral("/raad-signature-XXXXXX.sig"));
+        sigTmp.setAutoRemove(true);
+        if (!sigTmp.open()) {
+            if (errorOut) *errorOut = QStringLiteral("Cannot create temporary signature file");
+            return false;
+        }
+        sigTmp.write(sigData);
+        sigTmp.flush();
+
+        QString verifyError;
+        if (!verifySignatureWithOpenSsl(payloadPath, sigTmp.fileName(), m_publicKeyPath, &verifyError)) {
+            if (errorOut) *errorOut = verifyError;
+            return false;
+        }
+        nextSignatureVerified = true;
+    }
+
+    if (m_signatureVerified != nextSignatureVerified) {
+        m_signatureVerified = nextSignatureVerified;
+        emit signatureVerificationChanged();
+    }
+    return true;
 }

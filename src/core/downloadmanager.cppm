@@ -33,6 +33,7 @@ module;
 #include <QPointer>
 #include <QFutureWatcher>
 #include <QVariantMap>
+#include <QJsonDocument>
 
 #ifndef Q_MOC_RUN
 export module raad.core.downloadmanager;
@@ -112,6 +113,33 @@ RAAD_MODULE_EXPORT class DownloadManager : public QObject {
 
     //!< @brief Last network test status kind (info/success/warning/danger).
     Q_PROPERTY(QString networkTestKind READ networkTestKind NOTIFY networkTestStateChanged)
+
+    //!< @brief Max concurrent active downloads per host.
+    Q_PROPERTY(int perHostMaxConcurrent READ perHostMaxConcurrent WRITE setPerHostMaxConcurrent NOTIFY schedulingPolicyChanged)
+
+    //!< @brief Persist potentially sensitive network options in session.
+    Q_PROPERTY(bool persistSensitiveOptions READ persistSensitiveOptions WRITE setPersistSensitiveOptions NOTIFY persistencePolicyChanged)
+
+    //!< @brief Enable backend telemetry event stream.
+    Q_PROPERTY(bool telemetryEnabled READ telemetryEnabled WRITE setTelemetryEnabled NOTIFY telemetryPolicyChanged)
+
+    //!< @brief Default User-Agent used for new tasks and network tests.
+    Q_PROPERTY(QString defaultUserAgent READ defaultUserAgent WRITE setDefaultUserAgent NOTIFY networkDefaultsChanged)
+
+    //!< @brief Default policy for ignoring SSL errors.
+    Q_PROPERTY(bool defaultAllowInsecureSsl READ defaultAllowInsecureSsl WRITE setDefaultAllowInsecureSsl NOTIFY networkDefaultsChanged)
+
+    //!< @brief Default proxy host used for new tasks and network tests.
+    Q_PROPERTY(QString defaultProxyHost READ defaultProxyHost WRITE setDefaultProxyHost NOTIFY networkDefaultsChanged)
+
+    //!< @brief Default proxy port used for new tasks and network tests.
+    Q_PROPERTY(int defaultProxyPort READ defaultProxyPort WRITE setDefaultProxyPort NOTIFY networkDefaultsChanged)
+
+    //!< @brief Default proxy user used for new tasks and network tests.
+    Q_PROPERTY(QString defaultProxyUser READ defaultProxyUser WRITE setDefaultProxyUser NOTIFY networkDefaultsChanged)
+
+    //!< @brief Default proxy password used for new tasks and network tests.
+    Q_PROPERTY(QString defaultProxyPassword READ defaultProxyPassword WRITE setDefaultProxyPassword NOTIFY networkDefaultsChanged)
 
 public:
     /**
@@ -234,6 +262,20 @@ public:
      * @param bytesPerSecond Limit in bytes/sec.
      */
     Q_INVOKABLE void setTaskMaxSpeed(int index, qint64 bytesPerSecond);
+
+    /**
+     * @brief Return task priority.
+     * @param index Row index.
+     * @return Priority value.
+     */
+    Q_INVOKABLE int taskPriority(int index) const;
+
+    /**
+     * @brief Set task priority.
+     * @param index Row index.
+     * @param priority Priority value (higher starts sooner).
+     */
+    Q_INVOKABLE void setTaskPriority(int index, int priority);
 
     /**
      * @brief Pause a specific task.
@@ -523,6 +565,13 @@ public:
      */
     Q_INVOKABLE void copyText(const QString& text) const;
 
+    /**
+     * @brief Execute one JSON backend API command.
+     * @param commandJson JSON object encoded as string.
+     * @return JSON response string.
+     */
+    Q_INVOKABLE QString processApiCommand(const QString& commandJson);
+
     //!< @brief Access the underlying list model.
     DownloadModel* model() { return &m_model; }
 
@@ -592,6 +641,87 @@ public:
     //!< @brief Return the current network test message kind.
     QString networkTestKind() const { return m_networkTestKind; }
 
+    //!< @brief Return per-host concurrent limit.
+    int perHostMaxConcurrent() const { return m_perHostMaxConcurrent; }
+
+    /**
+     * @brief Set per-host concurrent limit.
+     * @param value Max simultaneous active downloads per host.
+     */
+    void setPerHostMaxConcurrent(int value);
+
+    //!< @brief Return whether sensitive options are persisted.
+    bool persistSensitiveOptions() const { return m_persistSensitiveOptions; }
+
+    /**
+     * @brief Set whether sensitive options are persisted in session.
+     * @param enabled Toggle.
+     */
+    void setPersistSensitiveOptions(bool enabled);
+
+    //!< @brief Return telemetry policy.
+    bool telemetryEnabled() const { return m_telemetryEnabled; }
+
+    /**
+     * @brief Set telemetry policy.
+     * @param enabled Toggle.
+     */
+    void setTelemetryEnabled(bool enabled);
+
+    //!< @brief Return default User-Agent.
+    QString defaultUserAgent() const { return m_defaultUserAgent; }
+
+    /**
+     * @brief Set default User-Agent.
+     * @param value User-Agent value.
+     */
+    void setDefaultUserAgent(const QString& value);
+
+    //!< @brief Return default insecure-SSL policy.
+    bool defaultAllowInsecureSsl() const { return m_defaultAllowInsecureSsl; }
+
+    /**
+     * @brief Set default insecure-SSL policy.
+     * @param enabled Whether SSL errors are ignored.
+     */
+    void setDefaultAllowInsecureSsl(bool enabled);
+
+    //!< @brief Return default proxy host.
+    QString defaultProxyHost() const { return m_defaultProxyHost; }
+
+    /**
+     * @brief Set default proxy host.
+     * @param value Hostname.
+     */
+    void setDefaultProxyHost(const QString& value);
+
+    //!< @brief Return default proxy port.
+    int defaultProxyPort() const { return m_defaultProxyPort; }
+
+    /**
+     * @brief Set default proxy port.
+     * @param value Port.
+     */
+    void setDefaultProxyPort(int value);
+
+    //!< @brief Return default proxy user.
+    QString defaultProxyUser() const { return m_defaultProxyUser; }
+
+    /**
+     * @brief Set default proxy user.
+     * @param value Username.
+     */
+    void setDefaultProxyUser(const QString& value);
+
+    //!< @brief Return default proxy password.
+    QString defaultProxyPassword() const { return m_defaultProxyPassword; }
+
+    /**
+     * @brief Set default proxy password.
+     * @param value Password.
+     */
+    void setDefaultProxyPassword(const QString& value);
+
 
 signals:
     //!< @brief Emitted when max concurrent changes.
@@ -626,6 +756,21 @@ signals:
 
     //!< @brief Emitted when network test status or running state changes.
     void networkTestStateChanged();
+
+    //!< @brief Emitted when scheduler policy changes.
+    void schedulingPolicyChanged();
+
+    //!< @brief Emitted when persistence policy changes.
+    void persistencePolicyChanged();
+
+    //!< @brief Emitted when telemetry policy changes.
+    void telemetryPolicyChanged();
+
+    //!< @brief Emitted when default network options change.
+    void networkDefaultsChanged();
+
+    //!< @brief Emits structured backend event payloads.
+    void backendEvent(const QString& name, const QVariantMap& payload);
 
 
 private slots:
@@ -814,6 +959,24 @@ private:
      */
     void setNetworkTestState(bool running, const QString& message, const QString& kind);
 
+    //!< @brief Return normalized host for a task URL.
+    QString taskHost(DownloaderTask* task) const;
+
+    //!< @brief Evaluate whether a task failure can be retried.
+    bool isRetryableFailure(DownloaderTask* task) const;
+
+    //!< @brief Compute retry delay with exponential backoff and jitter.
+    int nextRetryDelayMs(DownloaderTask* task, int attempt) const;
+
+    //!< @brief Return whether host cooldown window allows starting now.
+    bool hostCooldownAllowsStart(const QString& host, qint64 nowMs) const;
+
+    //!< @brief Persist one telemetry event as NDJSON.
+    void writeTelemetryEvent(const QString& name, const QVariantMap& payload);
+
+    //!< @brief Load session document with fallback to backup file.
+    QJsonDocument loadSessionDocument() const;
+
 
     DownloadModel m_model;                                                          //!< Backing list model.
     int m_maxConcurrent = 3;                                                        //!< Global max concurrent downloads.
@@ -829,6 +992,8 @@ private:
     QHash<DownloaderTask*, qint64> m_taskMaxSpeed;                                  //!< Per-task speed limit.
     QHash<DownloaderTask*, qint64> m_taskCompletedAt;                               //!< Per-task completion time.
     QHash<DownloaderTask*, int> m_taskRetryCount;                                   //!< Per-task retry count.
+    QHash<DownloaderTask*, int> m_taskPriority;                                     //!< Per-task priority.
+    QHash<DownloaderTask*, qint64> m_taskCreatedOrder;                              //!< Per-task insertion order.
     QHash<DownloaderTask*, QString> m_taskQueue;                                    //!< Per-task queue mapping.
     QHash<DownloaderTask*, QString> m_taskCategory;                                 //!< Per-task category mapping.
     QHash<DownloaderTask*, bool> m_taskPausedBySchedule;                            //!< Paused by schedule.
@@ -841,6 +1006,7 @@ private:
     QStringList m_queueOrder;                                                       //!< Queue ordering list.
     QHash<QString, QString> m_categoryFolders;                                      //!< Category folder mapping.
     QHash<QString, QString> m_domainRules;                                          //!< Host-to-queue mapping.
+    QHash<QString, qint64> m_hostCooldownUntilMs;                                   //!< Per-host cooldown deadline.
     QTimer m_saveTimer;                                                             //!< Debounced session save timer.
     QTimer m_schedulerTimer;                                                        //!< Scheduler tick timer.
     QTimer m_powerTimer;                                                            //!< Power polling timer.
@@ -850,13 +1016,25 @@ private:
     bool m_onBattery = false;                                                       //!< Cached power state.
     bool m_restoreInProgress = false;                                               //!< Session restore guard.
     bool m_bulkCancelInProgress = false;                                            //!< Bulk cancel guard.
+    qint64 m_taskOrderCounter = 0;                                                  //!< Task insertion sequence.
     int m_autoRetryMax = 2;                                                         //!< Default retry attempts.
     int m_autoRetryDelaySec = 5;                                                    //!< Default retry delay in seconds.
+    int m_perHostMaxConcurrent = 8;                                                 //!< Max active downloads per host.
+    bool m_persistSensitiveOptions = false;                                         //!< Persist sensitive network options.
+    bool m_telemetryEnabled = true;                                                 //!< Telemetry stream toggle.
+    QString m_defaultUserAgent = QStringLiteral("raad/1.0");                        //!< Default User-Agent.
+    bool m_defaultAllowInsecureSsl = false;                                         //!< Default insecure SSL policy.
+    QString m_defaultProxyHost;                                                     //!< Default proxy host.
+    int m_defaultProxyPort = 0;                                                     //!< Default proxy port.
+    QString m_defaultProxyUser;                                                     //!< Default proxy username.
+    QString m_defaultProxyPassword;                                                 //!< Default proxy password.
     bool m_networkTestRunning = false;                                              //!< Network tester in-flight state.
     QString m_networkTestMessage;                                                   //!< Last network tester message.
     QString m_networkTestKind = QStringLiteral("muted");                            //!< Last network tester kind.
 
     QString m_sessionPath;                                                          //!< Session persistence path.
+    QString m_sessionBackupPath;                                                    //!< Backup session path.
+    QString m_telemetryPath;                                                        //!< Telemetry NDJSON path.
     PowerMonitor m_powerMonitor;                                                    //!< Power state helper.
 };
 

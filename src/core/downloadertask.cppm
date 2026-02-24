@@ -161,6 +161,45 @@ RAAD_MODULE_EXPORT class DownloaderTask : public QObject {
     //!< @brief Proxy password.
     Q_PROPERTY(QString proxyPassword READ proxyPassword WRITE setProxyPassword NOTIFY networkOptionsChanged)
 
+    //!< @brief Request User-Agent header.
+    Q_PROPERTY(QString userAgent READ userAgent WRITE setUserAgent NOTIFY networkOptionsChanged)
+
+    //!< @brief Whether SSL certificate errors are ignored.
+    Q_PROPERTY(bool allowInsecureSsl READ allowInsecureSsl WRITE setAllowInsecureSsl NOTIFY networkOptionsChanged)
+
+    //!< @brief Task priority (higher value = earlier scheduling).
+    Q_PROPERTY(int priority READ priority WRITE setPriority NOTIFY priorityChanged)
+
+    //!< @brief Whether adaptive segment controller is enabled.
+    Q_PROPERTY(bool adaptiveSegmentsEnabled READ adaptiveSegmentsEnabled WRITE setAdaptiveSegmentsEnabled NOTIFY adaptiveSegmentsChanged)
+
+    //!< @brief Current adaptive target segment count.
+    Q_PROPERTY(int adaptiveTarget READ adaptiveTarget NOTIFY adaptiveSegmentsChanged)
+
+    //!< @brief Estimated process CPU load used by adaptive controller.
+    Q_PROPERTY(qreal adaptiveCpuLoad READ adaptiveCpuLoad NOTIFY adaptiveMetricsChanged)
+
+    //!< @brief Estimated disk write latency in ms (EMA).
+    Q_PROPERTY(qreal adaptiveWriteLatency READ adaptiveWriteLatency NOTIFY adaptiveMetricsChanged)
+
+    //!< @brief Estimated network loss/instability ratio (0..1).
+    Q_PROPERTY(qreal adaptivePacketLoss READ adaptivePacketLoss NOTIFY adaptiveMetricsChanged)
+
+    //!< @brief Last structured error category.
+    Q_PROPERTY(QString errorCategory READ errorCategory NOTIFY errorStateChanged)
+
+    //!< @brief Last structured error code.
+    Q_PROPERTY(QString errorCode READ errorCode NOTIFY errorStateChanged)
+
+    //!< @brief Last structured error message.
+    Q_PROPERTY(QString errorMessage READ errorMessage NOTIFY errorStateChanged)
+
+    //!< @brief Last observed HTTP status code.
+    Q_PROPERTY(int lastHttpStatus READ lastHttpStatus NOTIFY errorStateChanged)
+
+    //!< @brief Last observed network error code.
+    Q_PROPERTY(int lastNetworkError READ lastNetworkError NOTIFY errorStateChanged)
+
 public:
     /**
      * @brief Construct a new download task.
@@ -498,6 +537,69 @@ public:
      */
     void setProxyPassword(const QString& value);
 
+    //!< @brief Return request User-Agent.
+    QString userAgent() const { return m_userAgent; }
+
+    /**
+     * @brief Set request User-Agent.
+     * @param value User-Agent value.
+     */
+    void setUserAgent(const QString& value);
+
+    //!< @brief Return insecure SSL policy.
+    bool allowInsecureSsl() const { return m_allowInsecureSsl; }
+
+    /**
+     * @brief Set insecure SSL policy.
+     * @param enabled Whether SSL errors are ignored.
+     */
+    void setAllowInsecureSsl(bool enabled);
+
+    //!< @brief Return task priority.
+    int priority() const { return m_priority; }
+
+    /**
+     * @brief Set task priority.
+     * @param value Priority value (higher starts sooner).
+     */
+    void setPriority(int value);
+
+    //!< @brief Return adaptive segment toggle.
+    bool adaptiveSegmentsEnabled() const { return m_adaptiveSegmentsEnabled; }
+
+    /**
+     * @brief Enable/disable adaptive segment controller.
+     * @param enabled Toggle state.
+     */
+    void setAdaptiveSegmentsEnabled(bool enabled);
+
+    //!< @brief Return current adaptive target segment count.
+    int adaptiveTarget() const { return m_adaptiveTarget; }
+
+    //!< @brief Return adaptive process CPU load estimate.
+    qreal adaptiveCpuLoad() const { return m_adaptiveCpuLoadPct; }
+
+    //!< @brief Return adaptive write latency estimate (ms).
+    qreal adaptiveWriteLatency() const { return m_adaptiveWriteLatencyMs; }
+
+    //!< @brief Return adaptive packet-loss/instability estimate (0..1).
+    qreal adaptivePacketLoss() const { return m_adaptivePacketLossRate; }
+
+    //!< @brief Return error category.
+    QString errorCategory() const { return m_errorCategory; }
+
+    //!< @brief Return error code.
+    QString errorCode() const { return m_errorCode; }
+
+    //!< @brief Return error message.
+    QString errorMessage() const { return m_errorMessage; }
+
+    //!< @brief Return last HTTP status code.
+    int lastHttpStatus() const { return m_lastHttpStatus; }
+
+    //!< @brief Return last network error code.
+    int lastNetworkError() const { return m_lastNetworkError; }
+
     /**
      * @brief Seed persisted stats on restore.
      * @param lastSpeed Last speed value.
@@ -606,6 +708,18 @@ signals:
     //!< @brief Emitted when network options change.
     void networkOptionsChanged();
 
+    //!< @brief Emitted when priority changes.
+    void priorityChanged();
+
+    //!< @brief Emitted when adaptive segment state changes.
+    void adaptiveSegmentsChanged();
+
+    //!< @brief Emitted when adaptive metrics change.
+    void adaptiveMetricsChanged();
+
+    //!< @brief Emitted when structured error state changes.
+    void errorStateChanged();
+
 private slots:
     //!< @brief Handle completion of a segment.
     void onSegmentFinished();
@@ -702,6 +816,30 @@ private:
     int m_proxyPort = 0;                    //!< Proxy port.
     QString m_proxyUser;                    //!< Proxy user.
     QString m_proxyPassword;                //!< Proxy password.
+    QString m_userAgent = QStringLiteral("raad/1.0"); //!< Request User-Agent.
+    bool m_allowInsecureSsl = false;        //!< Ignore SSL errors.
+    int m_priority = 100;                   //!< Task priority.
+    bool m_adaptiveSegmentsEnabled = true;  //!< Adaptive segment controller toggle.
+    int m_adaptiveTarget = 0;               //!< Adaptive segment target.
+    QString m_errorCategory;                //!< Last error category.
+    QString m_errorCode;                    //!< Last error code.
+    QString m_errorMessage;                 //!< Last error message.
+    int m_lastHttpStatus = 0;               //!< Last HTTP status observed.
+    int m_lastNetworkError = -1;            //!< Last network error observed.
+    int m_adaptiveErrors = 0;               //!< Recent network error samples.
+    int m_adaptiveThrottleHits = 0;         //!< Recent throttling-pressure samples.
+    int m_adaptiveServerThrottleHints = 0;  //!< Recent server throttling hints (e.g. HTTP 429/503).
+    qreal m_adaptiveWriteLatencyMs = 0.0;   //!< EMA write latency.
+    qreal m_adaptiveCpuLoadPct = 0.0;       //!< EMA CPU load percentage for this process.
+    qreal m_adaptivePacketLossRate = 0.0;   //!< Error/read ratio estimate in [0,1].
+    int m_adaptiveWriteSamples = 0;         //!< Latency sample count.
+    int m_adaptiveCpuSamples = 0;           //!< CPU load sample count.
+    int m_adaptivePacketLossHints = 0;      //!< Packet-loss/instability hint counter.
+    qint64 m_adaptiveReadEvents = 0;        //!< Successful read event counter.
+    qint64 m_adaptiveErrorEvents = 0;       //!< Network error event counter.
+    qint64 m_adaptiveCpuLastClockTicks = 0; //!< Last process CPU clock sample.
+    qint64 m_adaptiveCpuLastWallMs = 0;     //!< Last wall-time CPU sample.
+    qint64 m_adaptiveLastEvalMs = 0;        //!< Last adaptive evaluate timestamp.
 
     // throttle window (non-blocking)
     QElapsedTimer m_throttleTimer;          //!< Throttle timer.
@@ -781,6 +919,46 @@ private:
      * @param req Request to modify.
      */
     void applyNetworkOptions(QNetworkRequest& req) const;
+
+    //!< @brief Record write latency sample for adaptive controller.
+    void sampleWriteLatency(qint64 elapsedMs);
+
+    //!< @brief Record CPU-pressure sample for adaptive controller.
+    void sampleCpuLoad();
+
+    //!< @brief Record successful network read for adaptive controller.
+    void sampleNetworkRead(qint64 bytes);
+
+    //!< @brief Record network error for adaptive controller.
+    void sampleNetworkError(QNetworkReply::NetworkError err);
+
+    //!< @brief Evaluate and apply adaptive segment target.
+    void evaluateAdaptiveSegments();
+
+    //!< @brief Determine a recommended adaptive segment target.
+    int recommendedAdaptiveTarget() const;
+
+    //!< @brief Reset adaptive controller samples.
+    void resetAdaptiveStats();
+
+    //!< @brief Validate write permissions for destination path.
+    bool ensureOutputWritable(QString* why = nullptr) const;
+
+    //!< @brief Validate free space before download/resume.
+    bool ensureDiskCapacity(qint64 totalSizeBytes, qint64 alreadyHaveBytes, QString* why = nullptr) const;
+
+    //!< @brief Parse start offset from a Content-Range header.
+    qint64 parseContentRangeStart(const QByteArray& contentRange) const;
+
+    //!< @brief Set structured error state.
+    void recordError(const QString& category,
+                     const QString& code,
+                     const QString& message,
+                     int httpStatus = 0,
+                     int networkError = -1);
+
+    //!< @brief Clear structured error state.
+    void clearErrorState();
 };
 
 #include "downloadertask.moc"
