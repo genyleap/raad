@@ -443,6 +443,21 @@ void DownloadManager::onTaskFinishedWrapper(bool success) {
                         });
 
     if (state == "Done") {
+        // Ensure final progress metadata is consistent for completed tasks.
+        qint64 finalReceived = qMax(m_taskReceived.value(t, 0), m_taskTotal.value(t, 0));
+        if (finalReceived <= 0) {
+            const QString normalized = utils::normalizeFilePath(t->fileName());
+            const QFileInfo info(normalized);
+            if (info.exists() && info.isFile()) {
+                finalReceived = qMax<qint64>(0, info.size());
+            }
+        }
+        const qint64 finalTotal = qMax(m_taskTotal.value(t, 0), finalReceived);
+        m_taskReceived[t] = finalReceived;
+        m_taskLastReceived[t] = finalReceived;
+        m_taskTotal[t] = finalTotal;
+        m_model.seedProgress(t, finalReceived, finalTotal);
+
         m_taskRetryCount[t] = 0;
         emit toastRequested(QStringLiteral("Download finished: %1").arg(name), QStringLiteral("success"));
         applyPostActions(t);
@@ -875,6 +890,15 @@ void DownloadManager::retryFailed()
             t->restart();
         }
     }
+    startQueued();
+    scheduleSave();
+}
+
+void DownloadManager::retryTask(int index)
+{
+    DownloaderTask* task = m_model.taskAt(index);
+    if (!task) return;
+    task->restart();
     startQueued();
     scheduleSave();
 }

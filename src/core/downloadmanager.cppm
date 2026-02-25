@@ -217,6 +217,12 @@ public:
     Q_INVOKABLE void retryFailed();
 
     /**
+     * @brief Retry one task by row index.
+     * @param index Row index.
+     */
+    Q_INVOKABLE void retryTask(int index);
+
+    /**
      * @brief Open the downloaded file for a row.
      * @param index Row index.
      */
