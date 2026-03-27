@@ -21,7 +21,7 @@ int main(int argc, char *argv[])
     QCoreApplication::setOrganizationName(QStringLiteral("Genyleap"));
     QCoreApplication::setApplicationName(QStringLiteral("Raad"));
     QCoreApplication::setApplicationVersion(QStringLiteral(APP_VERSION));
-    QQuickStyle::setStyle("Basic"); // FluentWinUI3
+    QQuickStyle::setStyle("Basic");
 
     // Create DownloadManager instance
     DownloadManager manager;

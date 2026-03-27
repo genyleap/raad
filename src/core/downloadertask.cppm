@@ -234,8 +234,14 @@ public:
     //!< @brief Restart the download from scratch.
     Q_INVOKABLE void restart();
 
+    //!< @brief Recover from a paused/error state while preserving partial data.
+    Q_INVOKABLE void recover();
+
     //!< @brief Mark the task as paused without network state.
     void markPaused();
+
+    //!< @brief Convert an error state into a paused state with a reason.
+    void pauseAfterFailure(const QString& reason);
 
     //!< @brief Mark the task as failed.
     void markError();

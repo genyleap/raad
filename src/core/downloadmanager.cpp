@@ -23,6 +23,7 @@ module;
 #include <QTextStream>
 #include <QCryptographicHash>
 #include <QNetworkAccessManager>
+#include <QNetworkInformation>
 #include <QNetworkRequest>
 #include <QNetworkReply>
 #include <QNetworkProxy>
@@ -112,6 +113,14 @@ DownloadManager::DownloadManager(QObject* parent) : QObject(parent) {
     loadSession();
     schedulerTick();
     updatePowerState();
+
+    QNetworkInformation::loadDefaultBackend();
+    if (QNetworkInformation* info = QNetworkInformation::instance()) {
+        connect(info, &QNetworkInformation::reachabilityChanged, this, [this]() {
+            handleNetworkReachabilityChanged();
+        });
+        handleNetworkReachabilityChanged();
+    }
 }
 
 void DownloadManager::setNetworkTestState(bool running, const QString& message, const QString& kind)
@@ -181,6 +190,87 @@ bool DownloadManager::hostCooldownAllowsStart(const QString& host, qint64 nowMs)
 {
     if (host.isEmpty()) return true;
     return m_hostCooldownUntilMs.value(host, 0) <= nowMs;
+}
+
+bool DownloadManager::isConnectivityFailure(DownloaderTask* task) const
+{
+    if (!task) return false;
+    const auto err = static_cast<QNetworkReply::NetworkError>(task->lastNetworkError());
+    switch (err) {
+    case QNetworkReply::TimeoutError:
+    case QNetworkReply::OperationCanceledError:
+    case QNetworkReply::TemporaryNetworkFailureError:
+    case QNetworkReply::NetworkSessionFailedError:
+    case QNetworkReply::HostNotFoundError:
+    case QNetworkReply::RemoteHostClosedError:
+    case QNetworkReply::ConnectionRefusedError:
+    case QNetworkReply::ProxyConnectionRefusedError:
+    case QNetworkReply::ProxyTimeoutError:
+    case QNetworkReply::UnknownNetworkError:
+        return true;
+    default:
+        break;
+    }
+
+    const int status = task->lastHttpStatus();
+    return status == 408 || status == 429 || status == 503 || status == 504;
+}
+
+QString DownloadManager::pauseReasonForFailure(DownloaderTask* task) const
+{
+    if (!task) return QStringLiteral("Network");
+
+    const auto err = static_cast<QNetworkReply::NetworkError>(task->lastNetworkError());
+    switch (err) {
+    case QNetworkReply::TemporaryNetworkFailureError:
+    case QNetworkReply::NetworkSessionFailedError:
+        return QStringLiteral("Network changed");
+    case QNetworkReply::TimeoutError:
+    case QNetworkReply::HostNotFoundError:
+    case QNetworkReply::RemoteHostClosedError:
+    case QNetworkReply::ConnectionRefusedError:
+    case QNetworkReply::ProxyConnectionRefusedError:
+    case QNetworkReply::ProxyTimeoutError:
+    case QNetworkReply::UnknownNetworkError:
+        return QStringLiteral("Network offline");
+    default:
+        break;
+    }
+
+    const int status = task->lastHttpStatus();
+    if (status == 429 || status == 503 || status == 504) {
+        return QStringLiteral("Server busy");
+    }
+    return QStringLiteral("Network");
+}
+
+void DownloadManager::handleNetworkReachabilityChanged()
+{
+    QNetworkInformation* info = QNetworkInformation::instance();
+    if (!info) return;
+
+    const auto reachability = info->reachability();
+    const bool online = reachability == QNetworkInformation::Reachability::Online;
+
+    for (DownloaderTask* task : m_queue) {
+        if (!task) continue;
+
+        if (!online && task->isRunning()) {
+            task->pauseWithReason(QStringLiteral("Network offline"));
+            m_taskPausedByNetwork[task] = true;
+            continue;
+        }
+
+        if (online && m_taskPausedByNetwork.value(task, false) && task->stateString() == "Paused") {
+            m_taskPausedByNetwork[task] = false;
+            task->recover();
+        }
+    }
+
+    if (online) {
+        startQueued();
+    }
+    scheduleSave();
 }
 
 void DownloadManager::writeTelemetryEvent(const QString& name, const QVariantMap& payload)
@@ -445,14 +535,18 @@ void DownloadManager::onTaskFinishedWrapper(bool success) {
     if (state == "Done") {
         // Ensure final progress metadata is consistent for completed tasks.
         qint64 finalReceived = qMax(m_taskReceived.value(t, 0), m_taskTotal.value(t, 0));
-        if (finalReceived <= 0) {
-            const QString normalized = utils::normalizeFilePath(t->fileName());
-            const QFileInfo info(normalized);
-            if (info.exists() && info.isFile()) {
-                finalReceived = qMax<qint64>(0, info.size());
+        qint64 finalTotal = qMax(m_taskTotal.value(t, 0), finalReceived);
+        const QString normalized = utils::normalizeFilePath(t->fileName());
+        const QFileInfo info(normalized);
+        if (info.exists() && info.isFile()) {
+            const qint64 actualSize = qMax<qint64>(0, info.size());
+            if (actualSize > 0) {
+                finalReceived = actualSize;
+                finalTotal = actualSize;
             }
+        } else if (finalReceived <= 0) {
+            finalReceived = 0;
         }
-        const qint64 finalTotal = qMax(m_taskTotal.value(t, 0), finalReceived);
         m_taskReceived[t] = finalReceived;
         m_taskLastReceived[t] = finalReceived;
         m_taskTotal[t] = finalTotal;
@@ -474,7 +568,7 @@ void DownloadManager::onTaskFinishedWrapper(bool success) {
         if (t->advanceMirror()) {
             const QString newUrl = t->url();
             emit toastRequested(QStringLiteral("Switching mirror: %1").arg(newUrl), QStringLiteral("warning"));
-            t->restart();
+            t->recover();
             startQueued();
         } else {
             const int maxRetries = t->retryMax() >= 0 ? t->retryMax() : m_autoRetryMax;
@@ -499,16 +593,21 @@ void DownloadManager::onTaskFinishedWrapper(bool success) {
                             QTimer::singleShot(remaining, this, [this, taskPtr]() {
                                 if (!taskPtr) return;
                                 if (taskPtr->stateString() == "Error") {
-                                    taskPtr->restart();
+                                    taskPtr->recover();
                                     startQueued();
                                 }
                             });
                             return;
                         }
-                        taskPtr->restart();
+                        taskPtr->recover();
                         startQueued();
                     }
                 });
+            } else if (retryable) {
+                const QString reason = pauseReasonForFailure(t);
+                t->pauseAfterFailure(reason);
+                m_taskPausedByNetwork[t] = isConnectivityFailure(t);
+                emit toastRequested(QStringLiteral("Paused: %1 (%2)").arg(name, reason), QStringLiteral("warning"));
             } else if (!retryable) {
                 emit toastRequested(QStringLiteral("Not retryable: %1").arg(name), QStringLiteral("warning"));
             }
@@ -788,6 +887,7 @@ void DownloadManager::removeDownload(int index)
     m_taskPausedBySchedule.remove(task);
     m_taskPausedByQuota.remove(task);
     m_taskPausedByBattery.remove(task);
+    m_taskPausedByNetwork.remove(task);
     if (m_checksumWatchers.contains(task)) {
         if (QPointer<QFutureWatcher<QString>> watcher = m_checksumWatchers.take(task)) {
             watcher->cancel();
@@ -822,6 +922,7 @@ void DownloadManager::clearCompleted()
                 m_taskPausedBySchedule.remove(task);
                 m_taskPausedByQuota.remove(task);
                 m_taskPausedByBattery.remove(task);
+                m_taskPausedByNetwork.remove(task);
                 if (m_checksumWatchers.contains(task)) {
                     if (QPointer<QFutureWatcher<QString>> watcher = m_checksumWatchers.take(task)) {
                         watcher->cancel();
@@ -878,6 +979,7 @@ void DownloadManager::cancelAll()
     m_taskPausedBySchedule.clear();
     m_taskPausedByQuota.clear();
     m_taskPausedByBattery.clear();
+    m_taskPausedByNetwork.clear();
     updateTotals();
     emit countsChanged();
     scheduleSave();
@@ -887,7 +989,7 @@ void DownloadManager::retryFailed()
 {
     for (DownloaderTask* t : m_queue) {
         if (t && t->stateString() == "Error") {
-            t->restart();
+            t->recover();
         }
     }
     startQueued();
@@ -898,7 +1000,7 @@ void DownloadManager::retryTask(int index)
 {
     DownloaderTask* task = m_model.taskAt(index);
     if (!task) return;
-    task->restart();
+    task->recover();
     startQueued();
     scheduleSave();
 }
@@ -1159,15 +1261,54 @@ void DownloadManager::pauseTask(int index)
 {
     DownloaderTask* task = m_model.taskAt(index);
     if (!task) return;
+    m_taskPausedByNetwork[task] = false;
     task->pause();
     scheduleSave();
+}
+
+int DownloadManager::indexOfTask(QObject* taskObject) const
+{
+    DownloaderTask* task = qobject_cast<DownloaderTask*>(taskObject);
+    return task ? m_model.indexOfTask(task) : -1;
+}
+
+int DownloadManager::taskCount() const
+{
+    return m_model.rowCount();
+}
+
+QObject* DownloadManager::taskObjectAt(int index) const
+{
+    return m_model.taskAt(index);
+}
+
+QString DownloadManager::taskQueueName(int index) const
+{
+    DownloaderTask* task = m_model.taskAt(index);
+    return task ? m_taskQueue.value(task, defaultQueueName()) : defaultQueueName();
+}
+
+QString DownloadManager::taskCategoryName(int index) const
+{
+    DownloaderTask* task = m_model.taskAt(index);
+    return task ? m_taskCategory.value(task, utils::detectCategory(task->fileName())) : QStringLiteral("Other");
 }
 
 void DownloadManager::resumeTask(int index)
 {
     DownloaderTask* task = m_model.taskAt(index);
     if (!task) return;
-    task->resume();
+    const QString pauseReason = task->pauseReason().trimmed();
+    const bool needsRecoveryResume = task->stateString() == "Error"
+        || (task->stateString() == "Paused"
+            && !pauseReason.isEmpty()
+            && pauseReason != QStringLiteral("User"));
+    if (needsRecoveryResume) {
+        m_taskPausedByNetwork[task] = false;
+        task->recover();
+    } else {
+        task->resume();
+    }
     startQueued();
     scheduleSave();
 }
@@ -1178,9 +1319,16 @@ void DownloadManager::togglePause(int index)
     if (!task) return;
     const QString state = task->stateString();
     if (state == "Active") {
+        m_taskPausedByNetwork[task] = false;
         task->pause();
     } else if (state == "Paused") {
-        task->resume();
+        const QString pauseReason = task->pauseReason().trimmed();
+        if (!pauseReason.isEmpty() && pauseReason != QStringLiteral("User")) {
+            m_taskPausedByNetwork[task] = false;
+            task->recover();
+        } else {
+            task->resume();
+        }
         startQueued();
     }
     scheduleSave();
@@ -2235,9 +2383,17 @@ void DownloadManager::loadSession()
             task->markCanceled();
         }
 
+        const QFileInfo restoredInfo(filePath);
+        const qint64 actualCompletedSize = (state == "Done" && restoredInfo.exists() && restoredInfo.isFile())
+            ? qMax<qint64>(0, restoredInfo.size())
+            : 0;
         const qint64 receivedFromDisk = utils::bytesReceivedOnDisk(filePath, segments);
-        const qint64 received = bytesReceived > 0 ? bytesReceived : receivedFromDisk;
-        const qint64 total = bytesTotal > 0 ? bytesTotal : 0;
+        const qint64 received = actualCompletedSize > 0
+            ? actualCompletedSize
+            : (bytesReceived > 0 ? bytesReceived : receivedFromDisk);
+        const qint64 total = actualCompletedSize > 0
+            ? actualCompletedSize
+            : (bytesTotal > 0 ? bytesTotal : 0);
         m_model.seedProgress(task, received, total);
         m_taskReceived[task] = received;
         m_taskTotal[task] = total;

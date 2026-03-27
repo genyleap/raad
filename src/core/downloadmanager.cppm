@@ -290,6 +290,39 @@ public:
     Q_INVOKABLE void pauseTask(int index);
 
     /**
+     * @brief Return the current row index for a task object.
+     * @param taskObject Task QObject.
+     * @return Row index, or -1 when not present.
+     */
+    Q_INVOKABLE int indexOfTask(QObject* taskObject) const;
+
+    /**
+     * @brief Return the current number of tasks in the model.
+     */
+    Q_INVOKABLE int taskCount() const;
+
+    /**
+     * @brief Return the task object at the given row.
+     * @param index Row index.
+     * @return Task QObject, or nullptr when invalid.
+     */
+    Q_INVOKABLE QObject* taskObjectAt(int index) const;
+
+    /**
+     * @brief Return the queue name for the task at the given row.
+     * @param index Row index.
+     * @return Queue name, or default queue when unavailable.
+     */
+    Q_INVOKABLE QString taskQueueName(int index) const;
+
+    /**
+     * @brief Return the category name for the task at the given row.
+     * @param index Row index.
+     * @return Category label.
+     */
+    Q_INVOKABLE QString taskCategoryName(int index) const;
+
+    /**
      * @brief Resume a specific task.
      * @param index Row index.
      */
@@ -977,6 +1010,15 @@ private:
     //!< @brief Return whether host cooldown window allows starting now.
     bool hostCooldownAllowsStart(const QString& host, qint64 nowMs) const;
 
+    //!< @brief Return whether the failure is due to connectivity loss/change.
+    bool isConnectivityFailure(DownloaderTask* task) const;
+
+    //!< @brief Build a pause reason for the last task failure.
+    QString pauseReasonForFailure(DownloaderTask* task) const;
+
+    //!< @brief React to reachability changes for transient network pauses.
+    void handleNetworkReachabilityChanged();
+
     //!< @brief Persist one telemetry event as NDJSON.
     void writeTelemetryEvent(const QString& name, const QVariantMap& payload);
 
@@ -1005,6 +1047,7 @@ private:
     QHash<DownloaderTask*, bool> m_taskPausedBySchedule;                            //!< Paused by schedule.
     QHash<DownloaderTask*, bool> m_taskPausedByQuota;                               //!< Paused by quota.
     QHash<DownloaderTask*, bool> m_taskPausedByBattery;                             //!< Paused by battery.
+    QHash<DownloaderTask*, bool> m_taskPausedByNetwork;                             //!< Paused by transient network issues.
     QHash<DownloaderTask*, QPointer<QFutureWatcher<QString>>> m_checksumWatchers;   //!< Async checksum watchers.
 
     QVector<DownloaderTask*> m_queue;                                               //!< Queue in insertion order.

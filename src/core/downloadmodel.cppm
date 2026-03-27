@@ -184,6 +184,13 @@ public:
     DownloaderTask* taskAt(int index) const;
 
     /**
+     * @brief Returns the current row index for a task.
+     * @param task Task pointer.
+     * @return Row index, or -1 when not present.
+     */
+    int indexOfTask(DownloaderTask* task) const;
+
+    /**
      * @brief Checks whether the download at the given index has finished.
      */
     bool isFinishedAt(int index) const;
@@ -207,6 +214,11 @@ private slots:
      * @param success Indicates whether the download completed successfully.
      */
     void onTaskFinished(bool success);
+
+    /**
+     * @brief Refreshes row state-dependent roles when a task state changes.
+     */
+    void onTaskStateChanged();
 
 private:
     //!< @brief Internal storage for download items.

@@ -63,6 +63,7 @@ void DownloadModel::addDownload(DownloaderTask* task, const QString& queueName, 
 
     connect(task, &DownloaderTask::progress, this, &DownloadModel::onTaskProgress);
     connect(task, &DownloaderTask::finished, this, &DownloadModel::onTaskFinished);
+    connect(task, &DownloaderTask::stateChanged, this, &DownloadModel::onTaskStateChanged);
 }
 
 void DownloadModel::updateMetadata(DownloaderTask* task, const QString& queueName, const QString& category) {
@@ -224,6 +225,15 @@ DownloaderTask* DownloadModel::taskAt(int index) const {
     return m_downloads[index].task;
 }
 
+int DownloadModel::indexOfTask(DownloaderTask* task) const
+{
+    if (!task) return -1;
+    for (int i = 0; i < m_downloads.size(); ++i) {
+        if (m_downloads[i].task == task) return i;
+    }
+    return -1;
+}
+
 bool DownloadModel::isFinishedAt(int index) const {
     if (index < 0 || index >= m_downloads.size()) return false;
     return m_downloads[index].finished;
@@ -256,7 +266,23 @@ void DownloadModel::onTaskFinished(bool) {
         if (m_downloads[i].task == senderTask) {
             m_downloads[i].finished = true;
             QModelIndex idx = index(i);
-            emit dataChanged(idx, idx, {FinishedRole});
+            emit dataChanged(idx, idx, {FinishedRole, StatusRole});
+            break;
+        }
+    }
+}
+
+void DownloadModel::onTaskStateChanged()
+{
+    auto* senderTask = qobject_cast<DownloaderTask*>(sender());
+    for (int i = 0; i < m_downloads.size(); ++i) {
+        if (m_downloads[i].task == senderTask) {
+            const QString state = senderTask ? senderTask->stateString() : QString();
+            m_downloads[i].finished = (state == QStringLiteral("Done")
+                                       || state == QStringLiteral("Canceled")
+                                       || state == QStringLiteral("Error"));
+            QModelIndex idx = index(i);
+            emit dataChanged(idx, idx, {StatusRole, FinishedRole});
             break;
         }
     }

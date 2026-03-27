@@ -1164,6 +1164,18 @@ void DownloaderTask::startSingleStream(bool resume)
             }
         }
 
+        if (!m_anyError && m_totalSize > 0) {
+            const QFileInfo info(m_filePath);
+            if (info.exists() && info.size() != m_totalSize) {
+                m_anyError = true;
+                recordError(QStringLiteral("disk"),
+                            QStringLiteral("final_size_mismatch"),
+                            QStringLiteral("Final file size mismatch (%1 != %2)")
+                                .arg(info.size())
+                                .arg(m_totalSize));
+            }
+        }
+
         m_state = State::Finished;
         emit stateChanged();
         emit finished(!m_anyError);
@@ -1505,6 +1517,7 @@ void DownloaderTask::rebalanceSegments()
 {
     if (m_state != State::Downloading) return;
     if (!m_useRange || !m_serverSupportsRange) return;
+    if (!m_adaptiveSegmentsEnabled) return;
     if (m_anyError) return;
     if (m_segmentsInfo.size() < 2) return;
 
@@ -1528,6 +1541,7 @@ void DownloaderTask::rebalanceSegments()
 
 bool DownloaderTask::splitLargestRemainingSegment()
 {
+    if (!m_adaptiveSegmentsEnabled) return false;
     constexpr qint64 kMinChunkBytes = 256 * 1024;
     constexpr int kMaxSegments = 32;
     if (m_segmentsInfo.size() >= kMaxSegments) return false;
@@ -1591,7 +1605,6 @@ bool DownloaderTask::splitLargestRemainingSegment()
 
     m_segmentsInfo.push_back(splitSegment);
     m_effectiveSegments = m_segmentsInfo.size();
-    m_segments = qMin(kMaxSegments, qMax(m_segments, m_effectiveSegments));
 
     appendLog(QStringLiteral("Dynamic split [%1-%2] + [%3-%4]")
                   .arg(donor.start)
@@ -1692,6 +1705,15 @@ bool DownloaderTask::mergeSegments()
         part.remove();
     }
     out.close();
+    const QFileInfo mergedInfo(m_filePath);
+    if (m_totalSize > 0 && mergedInfo.exists() && mergedInfo.size() != m_totalSize) {
+        recordError(QStringLiteral("disk"),
+                    QStringLiteral("merge_size_mismatch"),
+                    QStringLiteral("Merged file size mismatch (%1 != %2)")
+                        .arg(mergedInfo.size())
+                        .arg(m_totalSize));
+        return false;
+    }
     return true;
 }
 
@@ -1808,6 +1830,34 @@ void DownloaderTask::markPaused()
     emit etaChanged(-1);
 }
 
+void DownloaderTask::pauseAfterFailure(const QString& reason)
+{
+    if (m_state == State::Canceled)
+        return;
+    if (m_state == State::Downloading) {
+        pauseWithReason(reason);
+        return;
+    }
+
+    if (m_pauseReason != reason) {
+        m_pauseReason = reason;
+        emit pauseReasonChanged();
+    }
+    if (m_pausedAt == 0) {
+        m_pausedAt = QDateTime::currentMSecsSinceEpoch();
+        emit pausedAtChanged();
+    }
+    m_speed = 0;
+    m_eta = -1;
+    emit speedChanged(0);
+    emit etaChanged(-1);
+
+    if (m_state != State::Paused) {
+        m_state = State::Paused;
+        emit stateChanged();
+    }
+}
+
 void DownloaderTask::markError()
 {
     if (m_state == State::Finished && m_anyError)
@@ -1884,6 +1934,86 @@ void DownloaderTask::resume()
         emit pauseReasonChanged();
     }
     m_state = State::Idle;
+    start();
+}
+
+void DownloaderTask::recover()
+{
+    if (m_state == State::Canceled)
+        return;
+    if (m_state != State::Paused && !(m_state == State::Finished && m_anyError))
+        return;
+
+    appendLog(QStringLiteral("Recover requested"));
+
+    for (Segment& s : m_segmentsInfo) {
+        if (s.reply) {
+            QPointer<QNetworkReply> segReply = s.reply;
+            s.reply = nullptr;
+            if (segReply) {
+                QObject::disconnect(segReply, nullptr, this, nullptr);
+                segReply->abort();
+                if (segReply) segReply->deleteLater();
+            }
+        }
+        if (s.file) {
+            s.file->flush();
+            s.file->close();
+            s.file->deleteLater();
+            s.file = nullptr;
+        }
+        s.buffer.clear();
+        s.processing = false;
+    }
+
+    if (m_headReply) {
+        QPointer<QNetworkReply> oldHead = m_headReply;
+        m_headReply = nullptr;
+        if (oldHead) {
+            QObject::disconnect(oldHead, nullptr, this, nullptr);
+            oldHead->abort();
+            if (oldHead) oldHead->deleteLater();
+        }
+    }
+
+    if (m_singleReply) {
+        QPointer<QNetworkReply> oldReply = m_singleReply;
+        m_singleReply = nullptr;
+        if (oldReply) {
+            QObject::disconnect(oldReply, nullptr, this, nullptr);
+            oldReply->abort();
+            if (oldReply) oldReply->deleteLater();
+        }
+    }
+
+    if (m_singleFile) {
+        m_singleFile->flush();
+        m_singleFile->close();
+        m_singleFile->deleteLater();
+        m_singleFile = nullptr;
+    }
+
+    m_singleBuffer.clear();
+    m_singleProcessing = false;
+    m_singleWritten = 0;
+
+    if (!m_pauseReason.isEmpty()) {
+        m_pauseReason.clear();
+        emit pauseReasonChanged();
+    }
+    if (m_pausedAt != 0) {
+        m_pausedAt = 0;
+        emit pausedAtChanged();
+    }
+
+    m_anyError = false;
+    clearErrorState();
+    resetNetworkManager();
+
+    if (m_state != State::Idle) {
+        m_state = State::Idle;
+        emit stateChanged();
+    }
     start();
 }
 
