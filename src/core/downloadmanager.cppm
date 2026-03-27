@@ -34,6 +34,7 @@ module;
 #include <QFutureWatcher>
 #include <QVariantMap>
 #include <QJsonDocument>
+#include <QElapsedTimer>
 
 #ifndef Q_MOC_RUN
 export module raad.core.downloadmanager;
@@ -95,6 +96,12 @@ RAAD_MODULE_EXPORT class DownloadManager : public QObject {
 
     //!< @brief Aggregate total bytes expected across all tasks.
     Q_PROPERTY(qint64 totalSize READ totalSize NOTIFY totalsChanged)
+
+    //!< @brief Estimated RAAD process CPU load percentage.
+    Q_PROPERTY(qreal processCpuLoad READ processCpuLoad NOTIFY runtimeStatsChanged)
+
+    //!< @brief Estimated RAAD resident memory usage in bytes.
+    Q_PROPERTY(qint64 processMemoryBytes READ processMemoryBytes NOTIFY runtimeStatsChanged)
 
     //!< @brief Automatically pause downloads when running on battery power.
     Q_PROPERTY(bool pauseOnBattery READ pauseOnBattery WRITE setPauseOnBattery NOTIFY powerPolicyChanged)
@@ -650,6 +657,12 @@ public:
     //!< @brief Return aggregate total bytes.
     qint64 totalSize() const { return m_totalSize; }
 
+    //!< @brief Return estimated RAAD process CPU load percentage.
+    qreal processCpuLoad() const { return m_processCpuLoad; }
+
+    //!< @brief Return estimated RAAD resident memory usage in bytes.
+    qint64 processMemoryBytes() const { return m_processMemoryBytes; }
+
     //!< @brief Return pause-on-battery policy.
     bool pauseOnBattery() const { return m_pauseOnBattery; }
 
@@ -784,6 +797,9 @@ signals:
     //!< @brief Emitted when aggregate totals change.
     void totalsChanged();
 
+    //!< @brief Emitted when runtime telemetry changes.
+    void runtimeStatsChanged();
+
     //!< @brief Request a UI toast with message and kind.
     void toastRequested(const QString& message, const QString& kind);
 
@@ -840,6 +856,9 @@ private slots:
 
     //!< @brief Refresh power state.
     void updatePowerState();
+
+    //!< @brief Refresh process CPU and memory telemetry.
+    void updateRuntimeStats();
 
 private:
     /**
@@ -1059,6 +1078,7 @@ private:
     QTimer m_saveTimer;                                                             //!< Debounced session save timer.
     QTimer m_schedulerTimer;                                                        //!< Scheduler tick timer.
     QTimer m_powerTimer;                                                            //!< Power polling timer.
+    QTimer m_runtimeStatsTimer;                                                     //!< Runtime telemetry timer.
 
     bool m_pauseOnBattery = false;                                                  //!< Pause on battery policy.
     bool m_resumeOnAC = true;                                                       //!< Resume on AC policy.
@@ -1080,6 +1100,10 @@ private:
     bool m_networkTestRunning = false;                                              //!< Network tester in-flight state.
     QString m_networkTestMessage;                                                   //!< Last network tester message.
     QString m_networkTestKind = QStringLiteral("muted");                            //!< Last network tester kind.
+    qreal m_processCpuLoad = 0.0;                                                   //!< RAAD process CPU load percentage.
+    qint64 m_processMemoryBytes = 0;                                                //!< RAAD process resident memory.
+    qint64 m_lastProcessCpuTimeNs = 0;                                              //!< Previous CPU time sample.
+    QElapsedTimer m_runtimeStatsClock;                                              //!< Wall clock for CPU sampling.
 
     QString m_sessionPath;                                                          //!< Session persistence path.
     QString m_sessionBackupPath;                                                    //!< Backup session path.

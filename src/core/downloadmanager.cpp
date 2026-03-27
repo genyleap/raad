@@ -17,6 +17,7 @@ module;
 #include <QStandardPaths>
 #include <QTime>
 #include <QtGlobal>
+#include <QThread>
 #include <QClipboard>
 #include <QGuiApplication>
 #include <QPointer>
@@ -31,6 +32,14 @@ module;
 #include <QByteArrayView>
 #include <QRandomGenerator>
 #include <QtConcurrent>
+#include <QStorageInfo>
+
+#if defined(Q_OS_MACOS)
+#include <mach/mach.h>
+#include <sys/resource.h>
+#elif defined(Q_OS_LINUX)
+#include <sys/resource.h>
+#endif
 
 module raad.core.downloadmanager;
 
@@ -83,6 +92,52 @@ int segmentCountFromOptions(const QVariantMap* options)
     return ok ? normalizedSegmentCount(requested) : kDefaultSegments;
 }
 
+qint64 currentProcessCpuTimeNs()
+{
+#if defined(Q_OS_MACOS) || defined(Q_OS_LINUX)
+    struct rusage usage;
+    if (::getrusage(RUSAGE_SELF, &usage) == 0) {
+        const qint64 userNs = static_cast<qint64>(usage.ru_utime.tv_sec) * 1000000000LL
+            + static_cast<qint64>(usage.ru_utime.tv_usec) * 1000LL;
+        const qint64 sysNs = static_cast<qint64>(usage.ru_stime.tv_sec) * 1000000000LL
+            + static_cast<qint64>(usage.ru_stime.tv_usec) * 1000LL;
+        return userNs + sysNs;
+    }
+#endif
+    return 0;
+}
+
+qint64 currentProcessResidentBytes()
+{
+#if defined(Q_OS_MACOS)
+    mach_task_basic_info info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS) {
+        return static_cast<qint64>(info.resident_size);
+    }
+    return 0;
+#elif defined(Q_OS_LINUX)
+    QFile status(QStringLiteral("/proc/self/status"));
+    if (status.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        while (!status.atEnd()) {
+            const QByteArray line = status.readLine();
+            if (line.startsWith("VmRSS:")) {
+                const QList<QByteArray> parts = line.simplified().split(' ');
+                if (parts.size() >= 2) {
+                    bool ok = false;
+                    const qint64 kb = parts.at(1).toLongLong(&ok);
+                    if (ok) return kb * 1024LL;
+                }
+                break;
+            }
+        }
+    }
+    return 0;
+#else
+    return 0;
+#endif
+}
+
 } // namespace
 
 DownloadManager::DownloadManager(QObject* parent) : QObject(parent) {
@@ -101,6 +156,12 @@ DownloadManager::DownloadManager(QObject* parent) : QObject(parent) {
     connect(&m_powerTimer, &QTimer::timeout, this, &DownloadManager::updatePowerState);
     m_powerTimer.start();
 
+    m_runtimeStatsClock.start();
+    m_lastProcessCpuTimeNs = currentProcessCpuTimeNs();
+    m_runtimeStatsTimer.setInterval(1500);
+    connect(&m_runtimeStatsTimer, &QTimer::timeout, this, &DownloadManager::updateRuntimeStats);
+    m_runtimeStatsTimer.start();
+
     const QString baseDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     if (!baseDir.isEmpty()) {
         QDir().mkpath(baseDir);
@@ -113,6 +174,7 @@ DownloadManager::DownloadManager(QObject* parent) : QObject(parent) {
     loadSession();
     schedulerTick();
     updatePowerState();
+    updateRuntimeStats();
 
     QNetworkInformation::loadDefaultBackend();
     if (QNetworkInformation* info = QNetworkInformation::instance()) {
@@ -121,6 +183,34 @@ DownloadManager::DownloadManager(QObject* parent) : QObject(parent) {
         });
         handleNetworkReachabilityChanged();
     }
+}
+
+void DownloadManager::updateRuntimeStats()
+{
+    const qint64 currentCpuNs = currentProcessCpuTimeNs();
+    const qint64 wallNs = m_runtimeStatsClock.isValid() ? m_runtimeStatsClock.restart() * 1000000LL : 0LL;
+
+    qreal nextCpuLoad = m_processCpuLoad;
+    if (wallNs > 0 && currentCpuNs > 0 && m_lastProcessCpuTimeNs > 0) {
+        const qint64 cpuDeltaNs = qMax<qint64>(0, currentCpuNs - m_lastProcessCpuTimeNs);
+        const int cores = qMax(1, QThread::idealThreadCount());
+        nextCpuLoad = qBound<qreal>(0.0,
+                                    (static_cast<qreal>(cpuDeltaNs) / static_cast<qreal>(wallNs * cores)) * 100.0,
+                                    100.0);
+    }
+    m_lastProcessCpuTimeNs = currentCpuNs;
+
+    const qint64 nextMemoryBytes = currentProcessResidentBytes();
+    const bool cpuChanged = qAbs(nextCpuLoad - m_processCpuLoad) >= 0.5;
+    const bool memoryChanged = qAbs(nextMemoryBytes - m_processMemoryBytes) >= (256 * 1024);
+
+    if (!cpuChanged && !memoryChanged) {
+        return;
+    }
+
+    m_processCpuLoad = nextCpuLoad;
+    m_processMemoryBytes = nextMemoryBytes;
+    emit runtimeStatsChanged();
 }
 
 void DownloadManager::setNetworkTestState(bool running, const QString& message, const QString& kind)
