@@ -103,6 +103,15 @@ RAAD_MODULE_EXPORT class DownloadManager : public QObject {
     //!< @brief Estimated RAAD resident memory usage in bytes.
     Q_PROPERTY(qint64 processMemoryBytes READ processMemoryBytes NOTIFY runtimeStatsChanged)
 
+    //!< @brief Free bytes on the current downloads volume.
+    Q_PROPERTY(qint64 diskFreeBytes READ diskFreeBytes NOTIFY runtimeStatsChanged)
+
+    //!< @brief Human-readable network reachability state.
+    Q_PROPERTY(QString networkReachability READ networkReachability NOTIFY runtimeStatsChanged)
+
+    //!< @brief Average effective segment count across active downloads.
+    Q_PROPERTY(qreal averageActiveSegments READ averageActiveSegments NOTIFY runtimeStatsChanged)
+
     //!< @brief Automatically pause downloads when running on battery power.
     Q_PROPERTY(bool pauseOnBattery READ pauseOnBattery WRITE setPauseOnBattery NOTIFY powerPolicyChanged)
 
@@ -197,6 +206,7 @@ public:
      * @param index Row index.
      */
     Q_INVOKABLE void removeDownload(int index);
+    Q_INVOKABLE void removeDownloadWithOptions(int index, bool deleteFromDisk);
 
     /**
      * @brief Remove all finished downloads from the list.
@@ -663,6 +673,15 @@ public:
     //!< @brief Return estimated RAAD resident memory usage in bytes.
     qint64 processMemoryBytes() const { return m_processMemoryBytes; }
 
+    //!< @brief Return free bytes for the downloads volume.
+    qint64 diskFreeBytes() const { return m_diskFreeBytes; }
+
+    //!< @brief Return current network reachability label.
+    QString networkReachability() const { return m_networkReachability; }
+
+    //!< @brief Return average active segment count.
+    qreal averageActiveSegments() const { return m_averageActiveSegments; }
+
     //!< @brief Return pause-on-battery policy.
     bool pauseOnBattery() const { return m_pauseOnBattery; }
 
@@ -966,6 +985,15 @@ private:
     bool renameTaskFilesOnDisk(const QString& oldPath, const QString& newPath, int segments) const;
 
     /**
+     * @brief Delete task output and temporary segment files from disk.
+     * @param filePath Target file path.
+     * @param segments Configured segment count.
+     * @param effectiveSegments Runtime effective segment count.
+     * @return True if no file deletion failed.
+     */
+    bool deleteTaskFilesOnDisk(const QString& filePath, int segments, int effectiveSegments) const;
+
+    /**
      * @brief Resolve a category folder mapping.
      * @param category Category name.
      * @return Folder path or empty.
@@ -1102,6 +1130,9 @@ private:
     QString m_networkTestKind = QStringLiteral("muted");                            //!< Last network tester kind.
     qreal m_processCpuLoad = 0.0;                                                   //!< RAAD process CPU load percentage.
     qint64 m_processMemoryBytes = 0;                                                //!< RAAD process resident memory.
+    qint64 m_diskFreeBytes = 0;                                                     //!< Free bytes on downloads volume.
+    QString m_networkReachability = QStringLiteral("Unknown");                      //!< Cached reachability label.
+    qreal m_averageActiveSegments = 0.0;                                            //!< Avg effective segments across active tasks.
     qint64 m_lastProcessCpuTimeNs = 0;                                              //!< Previous CPU time sample.
     QElapsedTimer m_runtimeStatsClock;                                              //!< Wall clock for CPU sampling.
 

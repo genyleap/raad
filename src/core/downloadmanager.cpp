@@ -201,15 +201,69 @@ void DownloadManager::updateRuntimeStats()
     m_lastProcessCpuTimeNs = currentCpuNs;
 
     const qint64 nextMemoryBytes = currentProcessResidentBytes();
+    QString nextReachability = QStringLiteral("Unknown");
+    if (QNetworkInformation* info = QNetworkInformation::instance()) {
+        switch (info->reachability()) {
+        case QNetworkInformation::Reachability::Online:
+            nextReachability = QStringLiteral("Online");
+            break;
+        case QNetworkInformation::Reachability::Local:
+            nextReachability = QStringLiteral("Local");
+            break;
+        case QNetworkInformation::Reachability::Site:
+            nextReachability = QStringLiteral("Limited");
+            break;
+        case QNetworkInformation::Reachability::Disconnected:
+            nextReachability = QStringLiteral("Offline");
+            break;
+        case QNetworkInformation::Reachability::Unknown:
+        default:
+            nextReachability = QStringLiteral("Unknown");
+            break;
+        }
+    }
+
+    qint64 nextDiskFreeBytes = 0;
+    QString storagePath = defaultDownloadsFolderPath();
+    if (storagePath.isEmpty()) {
+        storagePath = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    }
+    if (!storagePath.isEmpty()) {
+        QStorageInfo storage(storagePath);
+        if (storage.isValid() && storage.isReady()) {
+            nextDiskFreeBytes = storage.bytesAvailable();
+        }
+    }
+
+    qreal nextAverageSegments = 0.0;
+    int activeSegmentTasks = 0;
+    qreal segmentSum = 0.0;
+    for (DownloaderTask* task : m_queue) {
+        if (!task || task->stateString() != QStringLiteral("Active")) {
+            continue;
+        }
+        segmentSum += task->effectiveSegments();
+        ++activeSegmentTasks;
+    }
+    if (activeSegmentTasks > 0) {
+        nextAverageSegments = segmentSum / static_cast<qreal>(activeSegmentTasks);
+    }
+
     const bool cpuChanged = qAbs(nextCpuLoad - m_processCpuLoad) >= 0.5;
     const bool memoryChanged = qAbs(nextMemoryBytes - m_processMemoryBytes) >= (256 * 1024);
+    const bool diskChanged = qAbs(nextDiskFreeBytes - m_diskFreeBytes) >= (16 * 1024 * 1024);
+    const bool reachabilityChanged = nextReachability != m_networkReachability;
+    const bool segmentsChanged = qAbs(nextAverageSegments - m_averageActiveSegments) >= 0.1;
 
-    if (!cpuChanged && !memoryChanged) {
+    if (!cpuChanged && !memoryChanged && !diskChanged && !reachabilityChanged && !segmentsChanged) {
         return;
     }
 
     m_processCpuLoad = nextCpuLoad;
     m_processMemoryBytes = nextMemoryBytes;
+    m_diskFreeBytes = nextDiskFreeBytes;
+    m_networkReachability = nextReachability;
+    m_averageActiveSegments = nextAverageSegments;
     emit runtimeStatsChanged();
 }
 
@@ -960,8 +1014,16 @@ void DownloadManager::startQueued()
 
 void DownloadManager::removeDownload(int index)
 {
+    removeDownloadWithOptions(index, false);
+}
+
+void DownloadManager::removeDownloadWithOptions(int index, bool deleteFromDisk)
+{
     DownloaderTask* task = m_model.taskAt(index);
     if (!task) return;
+    const QString filePath = utils::normalizeFilePath(task->fileName());
+    const int configuredSegments = task->segments();
+    const int effectiveSegments = task->effectiveSegments();
     m_queue.removeAll(task);
     m_taskSpeed.remove(task);
     m_taskReceived.remove(task);
@@ -985,6 +1047,9 @@ void DownloadManager::removeDownload(int index)
         }
     }
     task->cancel();
+    if (deleteFromDisk) {
+        deleteTaskFilesOnDisk(filePath, configuredSegments, effectiveSegments);
+    }
     m_model.removeAt(index);
     updateTotals();
     scheduleSave();
@@ -2742,6 +2807,34 @@ bool DownloadManager::renameTaskFilesOnDisk(const QString& oldPath, const QStrin
         }
     }
     return ok;
+}
+
+bool DownloadManager::deleteTaskFilesOnDisk(const QString& filePath, int segments, int effectiveSegments) const
+{
+    if (filePath.isEmpty()) return false;
+
+    bool removedAnything = false;
+    bool ok = true;
+
+    const auto removeIfExists = [&](const QString& path) {
+        if (!QFile::exists(path)) {
+            return;
+        }
+        removedAnything = true;
+        if (!QFile::remove(path)) {
+            ok = false;
+        }
+    };
+
+    removeIfExists(filePath);
+    removeIfExists(filePath + ".part");
+
+    const int maxParts = qMax(1, qMax(segments, effectiveSegments));
+    for (int i = 0; i < maxParts; ++i) {
+        removeIfExists(QString("%1.part%2").arg(filePath).arg(i));
+    }
+
+    return removedAnything && ok;
 }
 
 void DownloadManager::applyTaskSpeed(DownloaderTask* task)
