@@ -511,9 +511,16 @@ DownloaderTask* DownloadManager::addDownloadInternal(const QString &urlStr,
     }
 
     QString normalizedPath = utils::normalizeFilePath(filePath);
-    QString resolvedCategory = category.isEmpty() || category == "Auto"
-        ? (normalizedPath.isEmpty() ? QStringLiteral("Auto") : utils::detectCategory(normalizedPath))
-        : category;
+    const QString inferredUrlName = utils::fileNameFromUrl(url);
+    QString resolvedCategory = category;
+    if (resolvedCategory.isEmpty() || resolvedCategory == "Auto") {
+        if (!inferredUrlName.isEmpty()) {
+            resolvedCategory = utils::detectCategory(inferredUrlName);
+        }
+        if (resolvedCategory.isEmpty() || resolvedCategory == "Other") {
+            resolvedCategory = normalizedPath.isEmpty() ? QStringLiteral("Auto") : utils::detectCategory(normalizedPath);
+        }
+    }
 
     if (normalizedPath.isEmpty() || QFileInfo(normalizedPath).isDir()) {
         const QString fallback = normalizedPath;
@@ -526,10 +533,18 @@ DownloaderTask* DownloadManager::addDownloadInternal(const QString &urlStr,
 
     if (!normalizedPath.isEmpty()) {
         QFileInfo info(normalizedPath);
-        const QString maybeName = utils::fileNameFromUrl(url);
-        if (!maybeName.isEmpty() && utils::looksLikeGuidName(info.fileName())) {
-            normalizedPath = info.dir().filePath(maybeName);
+        if (!inferredUrlName.isEmpty() && utils::looksLikeGuidName(info.fileName())) {
+            normalizedPath = info.dir().filePath(inferredUrlName);
         }
+    }
+    if ((resolvedCategory.isEmpty() || resolvedCategory == "Auto" || resolvedCategory == "Other") && !normalizedPath.isEmpty()) {
+        const QString inferredPathCategory = utils::detectCategory(normalizedPath);
+        if (!inferredPathCategory.isEmpty() && inferredPathCategory != "Other") {
+            resolvedCategory = inferredPathCategory;
+        }
+    }
+    if (resolvedCategory.isEmpty() || resolvedCategory == "Auto") {
+        resolvedCategory = QStringLiteral("Other");
     }
     if (!resolvedCategory.isEmpty() && resolvedCategory != "Auto") {
         const QString folder = categoryFolderForName(resolvedCategory);
