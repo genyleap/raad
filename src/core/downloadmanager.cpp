@@ -515,10 +515,12 @@ DownloaderTask* DownloadManager::addDownloadInternal(const QString &urlStr,
     QString resolvedCategory = category;
     if (resolvedCategory.isEmpty() || resolvedCategory == "Auto") {
         if (!inferredUrlName.isEmpty()) {
-            resolvedCategory = utils::detectCategory(inferredUrlName);
+            resolvedCategory = utils::toString(utils::detectCategory(inferredUrlName));
         }
         if (resolvedCategory.isEmpty() || resolvedCategory == "Other") {
-            resolvedCategory = normalizedPath.isEmpty() ? QStringLiteral("Auto") : utils::detectCategory(normalizedPath);
+            resolvedCategory = normalizedPath.isEmpty()
+                ? QStringLiteral("Auto")
+                : utils::toString(utils::detectCategory(normalizedPath));
         }
     }
 
@@ -528,7 +530,7 @@ DownloaderTask* DownloadManager::addDownloadInternal(const QString &urlStr,
     }
 
     if (resolvedCategory == "Auto" && !normalizedPath.isEmpty()) {
-        resolvedCategory = utils::detectCategory(normalizedPath);
+        resolvedCategory = utils::toString(utils::detectCategory(normalizedPath));
     }
 
     if (!normalizedPath.isEmpty()) {
@@ -538,7 +540,7 @@ DownloaderTask* DownloadManager::addDownloadInternal(const QString &urlStr,
         }
     }
     if ((resolvedCategory.isEmpty() || resolvedCategory == "Auto" || resolvedCategory == "Other") && !normalizedPath.isEmpty()) {
-        const QString inferredPathCategory = utils::detectCategory(normalizedPath);
+        const QString inferredPathCategory = utils::toString(utils::detectCategory(normalizedPath));
         if (!inferredPathCategory.isEmpty() && inferredPathCategory != "Other") {
             resolvedCategory = inferredPathCategory;
         }
@@ -1461,7 +1463,8 @@ QString DownloadManager::taskQueueName(int index) const
 QString DownloadManager::taskCategoryName(int index) const
 {
     DownloaderTask* task = m_model.taskAt(index);
-    return task ? m_taskCategory.value(task, utils::detectCategory(task->fileName())) : QStringLiteral("Other");
+    return task ? m_taskCategory.value(task, utils::toString(utils::detectCategory(task->fileName())))
+                : QStringLiteral("Other");
 }
 
 void DownloadManager::resumeTask(int index)
@@ -1605,7 +1608,7 @@ void DownloadManager::exportList(const QString& path)
         obj.insert("url", task->url());
         obj.insert("filePath", task->fileName());
         obj.insert("queueName", m_taskQueue.value(task, defaultQueueName()));
-        obj.insert("category", m_taskCategory.value(task, utils::detectCategory(task->fileName())));
+        obj.insert("category", m_taskCategory.value(task, utils::toString(utils::detectCategory(task->fileName()))));
         obj.insert("state", task->stateString());
         obj.insert("bytesReceived", static_cast<double>(m_taskReceived.value(task, 0)));
         obj.insert("bytesTotal", static_cast<double>(m_taskTotal.value(task, 0)));
@@ -1867,7 +1870,7 @@ void DownloadManager::setTaskCategory(int index, const QString& category)
 {
     DownloaderTask* task = m_model.taskAt(index);
     if (!task) return;
-    const QString resolved = category.isEmpty() ? utils::detectCategory(task->fileName()) : category;
+    const QString resolved = category.isEmpty() ? utils::toString(utils::detectCategory(task->fileName())) : category;
     if (m_taskCategory.value(task) == resolved) return;
     m_taskCategory[task] = resolved;
     m_model.updateMetadata(task, m_taskQueue.value(task, defaultQueueName()), resolved);
@@ -2077,7 +2080,7 @@ void DownloadManager::removeDomainRule(const QString& host)
 QString DownloadManager::detectCategoryForName(const QString& name) const
 {
     if (name.isEmpty()) return QStringLiteral("Other");
-    return utils::detectCategory(name);
+    return utils::toString(utils::detectCategory(name));
 }
 
 QString DownloadManager::resolveDownloadPath(const QString& urlStr, const QString& category, const QString& fallbackFolder) const
@@ -2088,7 +2091,7 @@ QString DownloadManager::resolveDownloadPath(const QString& urlStr, const QStrin
 
     QString effectiveCategory = category;
     if (effectiveCategory.isEmpty() || effectiveCategory == "Auto") {
-        effectiveCategory = utils::detectCategory(fileName);
+        effectiveCategory = utils::toString(utils::detectCategory(fileName));
     }
     QString folder = categoryFolderForName(effectiveCategory);
     if (folder.isEmpty()) {
@@ -2217,7 +2220,12 @@ void DownloadManager::onTaskProgress(qint64 bytesReceived, qint64 bytesTotal)
     }
     m_taskReceived[task] = bytesReceived;
     m_taskTotal[task] = bytesTotal;
-    updateTotals();
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const bool forceUpdate = (bytesTotal > 0 && bytesReceived >= bytesTotal);
+    if (forceUpdate || m_lastTotalsUpdateMs <= 0 || (nowMs - m_lastTotalsUpdateMs) >= 120) {
+        m_lastTotalsUpdateMs = nowMs;
+        updateTotals();
+    }
 }
 
 void DownloadManager::onTaskSpeedChanged(qint64 bytesPerSecond)
@@ -2393,7 +2401,8 @@ void DownloadManager::loadSession()
         if (urlStr.isEmpty() || filePath.isEmpty()) continue;
         const int segments = normalizedSegmentCount(obj.value("segments").toInt(8));
         const QString queueName = obj.value("queueName").toString(defaultQueueName());
-        const QString category = obj.value("category").toString(utils::detectCategory(filePath));
+        const QString category = obj.value("category").toString(
+            utils::toString(utils::detectCategory(filePath)));
         const QString state = obj.value("state").toString();
         const qint64 taskMaxSpeed = static_cast<qint64>(obj.value("taskMaxSpeed").toDouble(0));
         const qint64 bytesTotal = static_cast<qint64>(obj.value("bytesTotal").toDouble(0));
@@ -2666,7 +2675,7 @@ void DownloadManager::saveSession()
         obj.insert("filePath", task->fileName());
         obj.insert("segments", task->segments());
         obj.insert("queueName", m_taskQueue.value(task, defaultQueueName()));
-        obj.insert("category", m_taskCategory.value(task, utils::detectCategory(task->fileName())));
+        obj.insert("category", m_taskCategory.value(task, utils::toString(utils::detectCategory(task->fileName()))));
         obj.insert("state", state);
         obj.insert("taskMaxSpeed", static_cast<double>(m_taskMaxSpeed.value(task, 0)));
         obj.insert("bytesReceived", static_cast<double>(m_taskReceived.value(task, 0)));

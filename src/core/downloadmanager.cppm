@@ -1079,6 +1079,7 @@ private:
     qint64 m_totalSpeed = 0;                                                        //!< Aggregate speed in bytes/sec.
     qint64 m_totalReceived = 0;                                                     //!< Aggregate received bytes.
     qint64 m_totalSize = 0;                                                         //!< Aggregate total bytes.
+    qint64 m_lastTotalsUpdateMs = 0;                                                //!< Last totals refresh timestamp.
 
     QHash<DownloaderTask*, qint64> m_taskSpeed;                                     //!< Per-task current speed.
     QHash<DownloaderTask*, qint64> m_taskReceived;                                  //!< Per-task received bytes.

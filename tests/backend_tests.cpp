@@ -54,9 +54,9 @@ void BackendTests::normalizeHost()
 
 void BackendTests::detectCategory()
 {
-    QCOMPARE(utils::detectCategory(QStringLiteral("movie.mkv")), QStringLiteral("Video"));
-    QCOMPARE(utils::detectCategory(QStringLiteral("archive.tar.gz")), QStringLiteral("Archives"));
-    QCOMPARE(utils::detectCategory(QStringLiteral("unknown.customext")), QStringLiteral("Other"));
+    QCOMPARE(utils::toString(utils::detectCategory(QStringLiteral("movie.mkv"))), QStringLiteral("Video"));
+    QCOMPARE(utils::toString(utils::detectCategory(QStringLiteral("archive.tar.gz"))), QStringLiteral("Archives"));
+    QCOMPARE(utils::toString(utils::detectCategory(QStringLiteral("unknown.customext"))), QStringLiteral("Other"));
 }
 
 QTEST_MAIN(BackendTests)

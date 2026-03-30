@@ -59,9 +59,12 @@ namespace {
 
     const auto url = QUrl::fromUserInput(value);
     if (url.isValid() && !url.scheme().isEmpty()) {
+        const bool explicitUrl =
+            value.contains(QStringLiteral("://"))
+            || value.startsWith(QStringLiteral("magnet:"), Qt::CaseInsensitive);
         if (url.isLocalFile()) {
             value = url.toLocalFile();
-        } else {
+        } else if (explicitUrl) {
             value = url.path();
         }
     }

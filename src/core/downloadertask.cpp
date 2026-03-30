@@ -521,6 +521,7 @@ int DownloaderTask::recommendedAdaptiveTarget() const
 void DownloaderTask::evaluateAdaptiveSegments()
 {
     if (!m_adaptiveSegmentsEnabled || m_state != State::Downloading) return;
+    if (m_maxSpeed > 0) return;
     if (!m_serverSupportsRange || !m_useRange) return;
 
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
@@ -710,6 +711,8 @@ void DownloaderTask::start()
     m_lastBytes = 0;
     m_throttleTimer.start();
     m_throttleBytes = 0;
+    m_lastProgressEmitMs = 0;
+    m_lastRebalanceMs = 0;
 
     const QUrl activeUrl = currentUrl();
     if (!activeUrl.isValid()) {
@@ -1224,11 +1227,15 @@ void DownloaderTask::processSingleBuffer()
         m_throttleBytes = 0;
     }
 
-    // update progress and speed/eta
-    qint64 totalDownloadedBytes = totalDownloaded();
-    emit progress(totalDownloadedBytes, m_totalSize);
-    updateSpeedAndETA();
-    evaluateAdaptiveSegments();
+    // update progress and speed/eta (rate-limited for smoother UI under caps)
+    const qint64 totalDownloadedBytes = totalDownloaded();
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const bool finishedNow = (m_totalSize > 0 && totalDownloadedBytes >= m_totalSize);
+    if (m_lastProgressEmitMs <= 0 || nowMs - m_lastProgressEmitMs >= 120 || finishedNow) {
+        m_lastProgressEmitMs = nowMs;
+        emit progress(totalDownloadedBytes, m_totalSize);
+        updateSpeedAndETA();
+    }
 
     m_singleProcessing = false;
 
@@ -1497,11 +1504,15 @@ void DownloaderTask::processSegmentBuffer(Segment* s)
         m_throttleBytes = 0;
     }
 
-    // update progress and speed/eta
-    qint64 totalDownloadedBytes = totalDownloaded();
-    emit progress(totalDownloadedBytes, m_totalSize);
-    updateSpeedAndETA();
-    evaluateAdaptiveSegments();
+    // update progress and speed/eta (rate-limited for smoother UI under caps)
+    const qint64 totalDownloadedBytes = totalDownloaded();
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const bool finishedNow = (m_totalSize > 0 && totalDownloadedBytes >= m_totalSize);
+    if (m_lastProgressEmitMs <= 0 || nowMs - m_lastProgressEmitMs >= 120 || finishedNow) {
+        m_lastProgressEmitMs = nowMs;
+        emit progress(totalDownloadedBytes, m_totalSize);
+        updateSpeedAndETA();
+    }
 
     s->processing = false;
     const bool hasPending = !s->buffer.isEmpty();
@@ -1510,7 +1521,14 @@ void DownloaderTask::processSegmentBuffer(Segment* s)
     }
 
     // Re-run dynamic balancing once buffered bytes are committed.
-    rebalanceSegments();
+    // Skip aggressive balancing while speed-capped to avoid churn.
+    if (m_maxSpeed <= 0) {
+        const qint64 rebalanceNowMs = QDateTime::currentMSecsSinceEpoch();
+        if (m_lastRebalanceMs <= 0 || rebalanceNowMs - m_lastRebalanceMs >= 800) {
+            m_lastRebalanceMs = rebalanceNowMs;
+            rebalanceSegments();
+        }
+    }
 }
 
 void DownloaderTask::rebalanceSegments()

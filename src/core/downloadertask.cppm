@@ -851,6 +851,8 @@ private:
     QElapsedTimer m_throttleTimer;          //!< Throttle timer.
     qint64 m_throttleBytes = 0;             //!< Bytes written in current throttle window.
     qint64 m_maxSpeed = 0;                  //!< Max speed in bytes/sec.
+    qint64 m_lastProgressEmitMs = 0;        //!< Last progress signal timestamp.
+    qint64 m_lastRebalanceMs = 0;           //!< Last segment rebalance timestamp.
 
     // single-stream helpers
     QByteArray m_singleBuffer;              //!< Single-stream buffer.
