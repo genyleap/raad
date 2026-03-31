@@ -21,7 +21,7 @@
  */
 
 module;
-#include <QAbstractListModel>
+#include <QAbstractTableModel>
 #include <QByteArray>
 #include <QHash>
 #include <QVariant>
@@ -77,10 +77,24 @@ RAAD_MODULE_EXPORT struct DownloadItem {
  * The model listens to signals emitted by DownloaderTask instances
  * and updates rows accordingly.
  */
-RAAD_MODULE_EXPORT class DownloadModel : public QAbstractListModel {
+RAAD_MODULE_EXPORT class DownloadModel : public QAbstractTableModel {
     Q_OBJECT
 
 public:
+    enum Columns {
+        SelectColumn = 0,
+        NameColumn,
+        QueueColumn,
+        SizeColumn,
+        StatusColumn,
+        EtaColumn,
+        SpeedColumn,
+        SegmentsColumn,
+        CategoryColumn,
+        ActionsColumn,
+        ColumnCount
+    };
+
     /**
      * @brief Custom model roles exposed to QML.
      */
@@ -109,9 +123,21 @@ public:
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
 
     /**
+     * @brief Returns the number of columns in the model.
+     */
+    int columnCount(const QModelIndex& parent = QModelIndex()) const override;
+
+    /**
      * @brief Returns data for a given row and role.
      */
     QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
+
+    /**
+     * @brief Returns table header labels for views that support headerData.
+     */
+    QVariant headerData(int section,
+                        Qt::Orientation orientation,
+                        int role = Qt::DisplayRole) const override;
 
     /**
      * @brief Returns role name mappings for QML access.

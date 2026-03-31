@@ -1,6 +1,6 @@
 module;
 #include <algorithm>
-#include <QAbstractListModel>
+#include <QAbstractTableModel>
 #include <QByteArray>
 #include <QFileInfo>
 #include <QHash>
@@ -12,16 +12,49 @@ module;
 
 module raad.core.downloadmodel;
 
-DownloadModel::DownloadModel(QObject *parent) : QAbstractListModel(parent) {}
+DownloadModel::DownloadModel(QObject *parent) : QAbstractTableModel(parent) {}
 
 int DownloadModel::rowCount(const QModelIndex &parent) const {
     Q_UNUSED(parent)
     return m_downloads.size();
 }
 
+int DownloadModel::columnCount(const QModelIndex &parent) const
+{
+    Q_UNUSED(parent)
+    return ColumnCount;
+}
+
 QVariant DownloadModel::data(const QModelIndex &index, int role) const {
     if (!index.isValid() || index.row() >= m_downloads.size()) return {};
     const auto &item = m_downloads[index.row()];
+
+    if (role == Qt::DisplayRole) {
+        switch (index.column()) {
+        case SelectColumn:
+            return {};
+        case NameColumn:
+            return QFileInfo(item.fileName).fileName();
+        case QueueColumn:
+            return item.queueName;
+        case SizeColumn:
+            return item.total;
+        case StatusColumn:
+            return item.task ? item.task->stateString() : QString();
+        case EtaColumn:
+            return item.task ? item.task->eta() : -1;
+        case SpeedColumn:
+            return item.task ? item.task->speed() : 0;
+        case SegmentsColumn:
+            return item.task ? item.task->effectiveSegments() : 0;
+        case CategoryColumn:
+            return item.category;
+        case ActionsColumn:
+            return {};
+        default:
+            return {};
+        }
+    }
 
     switch (role) {
     case FileNameRole: return item.fileName;
@@ -35,6 +68,27 @@ QVariant DownloadModel::data(const QModelIndex &index, int role) const {
     case CategoryRole: return item.category;
     }
     return {};
+}
+
+QVariant DownloadModel::headerData(int section, Qt::Orientation orientation, int role) const
+{
+    if (orientation != Qt::Horizontal || role != Qt::DisplayRole) {
+        return QAbstractTableModel::headerData(section, orientation, role);
+    }
+
+    switch (section) {
+    case SelectColumn: return QString();
+    case NameColumn: return QStringLiteral("Name");
+    case QueueColumn: return QStringLiteral("Queue");
+    case SizeColumn: return QStringLiteral("Size");
+    case StatusColumn: return QStringLiteral("Status");
+    case EtaColumn: return QStringLiteral("Time Left");
+    case SpeedColumn: return QStringLiteral("Speed");
+    case SegmentsColumn: return QStringLiteral("Seg");
+    case CategoryColumn: return QStringLiteral("Category");
+    case ActionsColumn: return QStringLiteral("Actions");
+    default: return {};
+    }
 }
 
 QHash<int, QByteArray> DownloadModel::roleNames() const {
@@ -72,8 +126,9 @@ void DownloadModel::updateMetadata(DownloaderTask* task, const QString& queueNam
         if (m_downloads[i].task == task) {
             m_downloads[i].queueName = queueName;
             m_downloads[i].category = category;
-            QModelIndex idx = index(i);
-            emit dataChanged(idx, idx, {QueueRole, CategoryRole});
+            const QModelIndex left = index(i, 0);
+            const QModelIndex right = index(i, ColumnCount - 1);
+            emit dataChanged(left, right, {QueueRole, CategoryRole});
             break;
         }
     }
@@ -86,8 +141,9 @@ void DownloadModel::seedProgress(DownloaderTask* task, qint64 bytesReceived, qin
         if (m_downloads[i].task == task) {
             m_downloads[i].received = bytesReceived;
             m_downloads[i].total = bytesTotal;
-            QModelIndex idx = index(i);
-            emit dataChanged(idx, idx, {ProgressRole, BytesReceivedRole, BytesTotalRole});
+            const QModelIndex left = index(i, 0);
+            const QModelIndex right = index(i, ColumnCount - 1);
+            emit dataChanged(left, right, {ProgressRole, BytesReceivedRole, BytesTotalRole});
             break;
         }
     }
@@ -100,8 +156,9 @@ void DownloadModel::seedFinished(DownloaderTask* task, bool finished)
         if (m_downloads[i].task == task) {
             if (m_downloads[i].finished == finished) break;
             m_downloads[i].finished = finished;
-            QModelIndex idx = index(i);
-            emit dataChanged(idx, idx, {FinishedRole});
+            const QModelIndex left = index(i, 0);
+            const QModelIndex right = index(i, ColumnCount - 1);
+            emit dataChanged(left, right, {FinishedRole});
             break;
         }
     }
@@ -114,8 +171,9 @@ void DownloadModel::updateFileName(DownloaderTask* task, const QString& fileName
         if (m_downloads[i].task == task) {
             if (m_downloads[i].fileName == fileName) break;
             m_downloads[i].fileName = fileName;
-            QModelIndex idx = index(i);
-            emit dataChanged(idx, idx, {FileNameRole});
+            const QModelIndex left = index(i, 0);
+            const QModelIndex right = index(i, ColumnCount - 1);
+            emit dataChanged(left, right, {FileNameRole});
             break;
         }
     }
@@ -253,8 +311,9 @@ void DownloadModel::onTaskProgress(qint64 bytesReceived, qint64 bytesTotal) {
         if (m_downloads[i].task == senderTask) {
             m_downloads[i].received = bytesReceived;
             m_downloads[i].total = bytesTotal;
-            QModelIndex idx = index(i);
-            emit dataChanged(idx, idx, {ProgressRole, BytesReceivedRole, BytesTotalRole});
+            const QModelIndex left = index(i, 0);
+            const QModelIndex right = index(i, ColumnCount - 1);
+            emit dataChanged(left, right, {ProgressRole, BytesReceivedRole, BytesTotalRole});
             break;
         }
     }
@@ -265,8 +324,9 @@ void DownloadModel::onTaskFinished(bool) {
     for (int i = 0; i < m_downloads.size(); ++i) {
         if (m_downloads[i].task == senderTask) {
             m_downloads[i].finished = true;
-            QModelIndex idx = index(i);
-            emit dataChanged(idx, idx, {FinishedRole, StatusRole});
+            const QModelIndex left = index(i, 0);
+            const QModelIndex right = index(i, ColumnCount - 1);
+            emit dataChanged(left, right, {FinishedRole, StatusRole});
             break;
         }
     }
@@ -281,8 +341,9 @@ void DownloadModel::onTaskStateChanged()
             m_downloads[i].finished = (state == QStringLiteral("Done")
                                        || state == QStringLiteral("Canceled")
                                        || state == QStringLiteral("Error"));
-            QModelIndex idx = index(i);
-            emit dataChanged(idx, idx, {StatusRole, FinishedRole});
+            const QModelIndex left = index(i, 0);
+            const QModelIndex right = index(i, ColumnCount - 1);
+            emit dataChanged(left, right, {StatusRole, FinishedRole});
             break;
         }
     }
