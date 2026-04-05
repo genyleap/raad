@@ -1818,9 +1818,20 @@ void DownloadManager::removeQueue(const QString& name)
         }
     }
 
+    bool domainRulesWereChanged = false;
+    for (auto it = m_domainRules.begin(); it != m_domainRules.end(); ++it) {
+        if (it.value() == name) {
+            it.value() = fallback;
+            domainRulesWereChanged = true;
+        }
+    }
+
     m_queues.remove(name);
     m_queueOrder.removeAll(name);
     emit queuesChanged();
+    if (domainRulesWereChanged) {
+        emit domainRulesChanged();
+    }
     scheduleSave();
     startQueued();
 }
@@ -1849,7 +1860,18 @@ void DownloadManager::renameQueue(const QString& oldName, const QString& newName
         }
     }
 
+    bool domainRulesWereChanged = false;
+    for (auto it = m_domainRules.begin(); it != m_domainRules.end(); ++it) {
+        if (it.value() == oldName) {
+            it.value() = trimmed;
+            domainRulesWereChanged = true;
+        }
+    }
+
     emit queuesChanged();
+    if (domainRulesWereChanged) {
+        emit domainRulesChanged();
+    }
     scheduleSave();
 }
 
