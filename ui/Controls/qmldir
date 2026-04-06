@@ -1,19 +1,27 @@
 module Raad.Controls
 
-Avatar 1.0 Avatar.qml
-Menu 1.0 Menu.qml
 Button 1.0 Button.qml
-IconButton 1.0 IconButton.qml
-MenuButton 1.0 MenuButton.qml
-PillButton 1.0 PillButton.qml
-Label 1.0 Label.qml
-ToolTip 1.0 ToolTip.qml
 Card 1.0 Card.qml
+Label 1.0 Label.qml
 TextField 1.0 TextField.qml
-TextArea 1.0 TextArea.qml
 ComboBox 1.0 ComboBox.qml
+CheckBox 1.0 CheckBox.qml
 SpinBox 1.0 SpinBox.qml
+Switch 1.0 Switch.qml
 ProgressBar 1.0 ProgressBar.qml
+TabBar 1.0 TabBar.qml
+TabButton 1.0 TabButton.qml
+AppMenuBar 1.0 AppMenuBar.qml
+AppMenuBarItem 1.0 AppMenuBarItem.qml
+AppMenu 1.0 AppMenu.qml
+AppMenuItem 1.0 AppMenuItem.qml
+AppMenuSeparator 1.0 AppMenuSeparator.qml
+AppMenuTrigger 1.0 AppMenuTrigger.qml
+CommandActionButton 1.0 CommandActionButton.qml
+CommandAddUrlButton 1.0 CommandAddUrlButton.qml
+SidebarTreeItem 1.0 SidebarTreeItem.qml
 AddDownloadDialog 1.0 AddDownloadDialog.qml
 DownloadDelegate 1.0 DownloadDelegate.qml
 DownloadListView 1.0 DownloadListView.qml
+DownloadDetailsDialog 1.0 DownloadDetailsDialog.qml
+DownloadDetailsWindow 1.0 DownloadDetailsWindow.qml

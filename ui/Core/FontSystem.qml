@@ -1,5 +1,13 @@
-// Copyright (C) 2026 Genyleap.
-// Copyright (C) 2026 Kambiz Asadzadeh
+/*!
+    \file        FontSystem.qml
+    \brief       Provides the FontSystem core QML definition for RAAD.
+    \details     This file contains shared FontSystem values and behavior used across the RAAD QML user interface.
+
+    \author      Kambiz Asadzadeh <https://github.com/thecompez>
+    \copyright   Copyright (c) 2026 Genyleap. All rights reserved.
+    \license     https://github.com/genyleap/raad/blob/main/LICENSE.md
+*/
+
 pragma Singleton
 import QtQuick
 
@@ -7,11 +15,13 @@ Item {
 
     property alias getAwesomeBrand: fontAwesomeBrand
     property alias getAwesomeRegular: fontAwesomeRegular
-    property alias getAwesomeLight: fontAwesomeRegular
+    property alias getAwesomeLight: fontAwesomeLight
+    property alias getAwesomeThin: fontAwesomeThin
     property alias getAwesomeSolid: fontAwesomeSolid
     property alias getContentFont: contentFontRegular
+    property alias getTitleBoldFont: contentFontRegular
     property alias getContentFontRegular: contentFontRegular
-    property alias getContentFontMedium: contentFontRegular
+    property alias getContentFontThin: fontAwesomeThin
     property alias getFontSize: fontSize
 
     QtObject {
@@ -28,23 +38,32 @@ Item {
 
     FontLoader {
         id: fontAwesomeBrand
-        source: "qrc:/ui/Resources/fonts/fa-brands-400.woff2"
+        source: "qrc:/resources/fonts/Font Awesome 6 Brands-Regular-400.otf"
     }
 
     FontLoader {
         id: fontAwesomeRegular
-        source: "qrc:/ui/Resources/fonts/fa-solid-900.woff2"
+        source: "qrc:/resources/fonts/Font Awesome 6 Pro-Regular-400.otf"
     }
 
+    FontLoader {
+        id: fontAwesomeLight
+        source: "qrc:/resources/fonts/Font Awesome 6 Pro-Light-300.otf"
+    }
+
+    FontLoader {
+        id: fontAwesomeThin
+        source: "qrc:/resources/fonts/Font Awesome 6 Pro-Thin-100.otf"
+    }
 
     FontLoader {
         id: fontAwesomeSolid
-        source: "qrc:/ui/Resources/fonts/fa-solid-900.woff2"
+        source: "qrc:/resources/fonts/Font Awesome 6 Pro-Solid-900.otf"
     }
 
     FontLoader {
         id: contentFontRegular
-        source: "qrc:/ui/Resources/fonts/Farhang2-Regular.ttf"
+        // source: Main.appRoot.isLeftToRight ? "resources/fonts/Inter-Medium.ttf" : "resources/fonts/IRANSansX-Regular.ttf"
+        source: "qrc:/resources/fonts/Inter-Medium.ttf"
     }
-
 }
