@@ -265,6 +265,7 @@ void UpdateClient::checkNow()
         return;
     }
     if (m_activeReply) {
+        m_activeReply->disconnect(this);
         m_activeReply->abort();
         m_activeReply->deleteLater();
         m_activeReply = nullptr;
@@ -313,6 +314,7 @@ void UpdateClient::downloadUpdate()
         return;
     }
     if (m_downloadReply) {
+        m_downloadReply->disconnect(this);
         m_downloadReply->abort();
         m_downloadReply->deleteLater();
         m_downloadReply = nullptr;
@@ -352,23 +354,38 @@ void UpdateClient::downloadUpdate()
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     req.setTransferTimeout(30000);
     req.setRawHeader("User-Agent", "raad/1.0");
-    m_downloadReply = m_net.get(req);
+    QNetworkReply* reply = m_net.get(req);
+    m_downloadReply = reply;
 
-    connect(m_downloadReply, &QNetworkReply::readyRead, this, [this]() {
-        if (!m_downloadFile || !m_downloadReply) return;
-        if (!m_downloadReply->isOpen() || m_downloadReply->isFinished()) return;
-        m_downloadFile->write(m_downloadReply->readAll());
+    connect(reply, &QNetworkReply::readyRead, this, [this, reply]() {
+        if (reply != m_downloadReply) return;
+        if (!m_downloadFile) return;
+        if (!reply->isOpen() || reply->isFinished()) return;
+        const QByteArray chunk = reply->readAll();
+        if (!chunk.isEmpty()) {
+            m_downloadFile->write(chunk);
+        }
     });
-    connect(m_downloadReply, &QNetworkReply::downloadProgress, this, [this](qint64 received, qint64 total) {
+    connect(reply, &QNetworkReply::downloadProgress, this, [this, reply](qint64 received, qint64 total) {
+        if (reply != m_downloadReply) return;
         if (total <= 0) return;
         m_downloadProgress = static_cast<qreal>(received) / static_cast<qreal>(total);
         emit downloadProgressChanged();
     });
-    connect(m_downloadReply, &QNetworkReply::finished, this, [this, targetPath]() {
-        if (!m_downloadReply) return;
-        const bool ok = (m_downloadReply->error() == QNetworkReply::NoError);
-        const QString err = m_downloadReply->errorString();
-        m_downloadReply->deleteLater();
+    connect(reply, &QNetworkReply::finished, this, [this, reply, targetPath]() {
+        if (reply != m_downloadReply) {
+            reply->deleteLater();
+            return;
+        }
+        if (m_downloadFile && reply->isOpen()) {
+            const QByteArray chunk = reply->readAll();
+            if (!chunk.isEmpty()) {
+                m_downloadFile->write(chunk);
+            }
+        }
+        const bool ok = (reply->error() == QNetworkReply::NoError);
+        const QString err = reply->errorString();
+        reply->deleteLater();
         m_downloadReply = nullptr;
         if (m_downloadFile) {
             m_downloadFile->flush();
@@ -508,11 +525,13 @@ void UpdateClient::installUpdate()
 void UpdateClient::resetSettingsToDefaults()
 {
     if (m_activeReply) {
+        m_activeReply->disconnect(this);
         m_activeReply->abort();
         m_activeReply->deleteLater();
         m_activeReply = nullptr;
     }
     if (m_downloadReply) {
+        m_downloadReply->disconnect(this);
         m_downloadReply->abort();
         m_downloadReply->deleteLater();
         m_downloadReply = nullptr;
@@ -695,12 +714,16 @@ void UpdateClient::checkWebsiteManifest()
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     req.setTransferTimeout(12000);
     req.setRawHeader("User-Agent", "raad/1.0");
-    m_activeReply = m_net.get(req);
-    connect(m_activeReply, &QNetworkReply::finished, this, [this]() {
-        if (!m_activeReply) return;
-        const QByteArray data = m_activeReply->readAll();
-        const bool ok = (m_activeReply->error() == QNetworkReply::NoError);
-        m_activeReply->deleteLater();
+    QNetworkReply* reply = m_net.get(req);
+    m_activeReply = reply;
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        if (reply != m_activeReply) {
+            reply->deleteLater();
+            return;
+        }
+        const QByteArray data = reply->readAll();
+        const bool ok = (reply->error() == QNetworkReply::NoError);
+        reply->deleteLater();
         m_activeReply = nullptr;
         if (!ok) {
             if (m_sourcePreference == QStringLiteral("auto") && !m_githubRepo.isEmpty()) {
@@ -741,12 +764,16 @@ void UpdateClient::checkGitHubReleases()
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     req.setTransferTimeout(12000);
     req.setRawHeader("User-Agent", "raad/1.0");
-    m_activeReply = m_net.get(req);
-    connect(m_activeReply, &QNetworkReply::finished, this, [this, allowPrerelease]() {
-        if (!m_activeReply) return;
-        const QByteArray data = m_activeReply->readAll();
-        const bool ok = (m_activeReply->error() == QNetworkReply::NoError);
-        m_activeReply->deleteLater();
+    QNetworkReply* reply = m_net.get(req);
+    m_activeReply = reply;
+    connect(reply, &QNetworkReply::finished, this, [this, reply, allowPrerelease]() {
+        if (reply != m_activeReply) {
+            reply->deleteLater();
+            return;
+        }
+        const QByteArray data = reply->readAll();
+        const bool ok = (reply->error() == QNetworkReply::NoError);
+        reply->deleteLater();
         m_activeReply = nullptr;
         if (!ok) {
             setStatus(QStringLiteral("Failed to fetch GitHub releases"));

@@ -77,6 +77,11 @@ Dialog {
     readonly property real contentSpacing: Metrics.padding * 1.25
     readonly property real dialogPadding: Metrics.padding * 2
     readonly property real footerImplicitHeight: hasFooter ? 64 : 0
+    readonly property real contentViewportHeight: Math.max(120,
+                                                           control.height
+                                                           - columnHeader.implicitHeight
+                                                           - footerImplicitHeight
+                                                           - Metrics.padding * 2.5)
 
     title: "About"
 
@@ -330,7 +335,7 @@ Dialog {
             appendFooterButton(Dialog.Reset, qsTr("Reset"), "reset")
 
         if (standardButtons & Dialog.RestoreDefaults)
-            appendFooterButton(Dialog.RestoreDefaults, qsTr("Restore Defaults"), "reset")
+            appendFooterButton(Dialog.RestoreDefaults, qsTr("Reset"), "reset")
 
         if (standardButtons & Dialog.Abort)
             appendFooterButton(Dialog.Abort, qsTr("Abort"), "reject")
@@ -552,7 +557,8 @@ Dialog {
 
                     text: buttonText
                     style: buttonStyle
-                    isDefault: buttonRole === "accept"
+                    isDefault: buttonStyle !== "default"
+                               || buttonRole === "accept"
                                || buttonRole === "apply"
                                || buttonRole === "yes"
                                || buttonRole === "discard"
@@ -586,14 +592,14 @@ Dialog {
     }
 
     contentItem: Item {
-        implicitHeight: contentColumn.implicitHeight
+        implicitHeight: Math.min(contentColumn.implicitHeight, control.contentViewportHeight)
         implicitWidth: contentColumn.implicitWidth
+        height: Math.min(contentColumn.implicitHeight, control.contentViewportHeight)
+        clip: true
 
         ColumnLayout {
             id: contentColumn
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.top: parent.top
+            anchors.fill: parent
             anchors.leftMargin: control.dialogPadding
             anchors.rightMargin: control.dialogPadding
             anchors.topMargin: Metrics.padding * 1.5
@@ -620,6 +626,7 @@ Dialog {
             ColumnLayout {
                 id: bodyContainer
                 Layout.fillWidth: true
+                Layout.fillHeight: true
                 spacing: control.contentSpacing
             }
 
