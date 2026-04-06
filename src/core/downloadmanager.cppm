@@ -599,6 +599,11 @@ public:
     Q_INVOKABLE void exportList(const QString& path);
 
     /**
+     * @brief Restore persisted download settings and session state to defaults.
+     */
+    Q_INVOKABLE void resetPersistentState();
+
+    /**
      * @brief Verify a download's checksum.
      * @param index Row index.
      */

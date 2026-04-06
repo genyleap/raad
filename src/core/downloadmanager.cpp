@@ -1620,6 +1620,87 @@ void DownloadManager::exportList(const QString& path)
     emit toastRequested(QStringLiteral("Exported list"), QStringLiteral("success"));
 }
 
+void DownloadManager::resetPersistentState()
+{
+    m_saveTimer.stop();
+
+    const QVector<DownloaderTask*> tasks = m_queue;
+    m_bulkCancelInProgress = true;
+    for (DownloaderTask* task : tasks) {
+        if (task) task->cancel();
+    }
+    m_bulkCancelInProgress = false;
+
+    for (auto it = m_checksumWatchers.begin(); it != m_checksumWatchers.end(); ++it) {
+        if (it.value()) {
+            it.value()->cancel();
+            it.value()->deleteLater();
+        }
+    }
+    m_checksumWatchers.clear();
+
+    m_queue.clear();
+    m_taskSpeed.clear();
+    m_taskReceived.clear();
+    m_taskTotal.clear();
+    m_taskLastReceived.clear();
+    m_taskMaxSpeed.clear();
+    m_taskCompletedAt.clear();
+    m_taskRetryCount.clear();
+    m_taskPriority.clear();
+    m_taskCreatedOrder.clear();
+    m_taskQueue.clear();
+    m_taskCategory.clear();
+    m_taskPausedBySchedule.clear();
+    m_taskPausedByQuota.clear();
+    m_taskPausedByBattery.clear();
+    m_taskPausedByNetwork.clear();
+    m_hostCooldownUntilMs.clear();
+    m_taskOrderCounter = 0;
+
+    for (int i = m_model.rowCount() - 1; i >= 0; --i) {
+        m_model.removeAt(i);
+    }
+
+    m_queues.clear();
+    m_queueOrder.clear();
+    ensureDefaultQueue();
+
+    m_categoryFolders.clear();
+    m_domainRules.clear();
+    emit categoryFoldersChanged();
+    emit domainRulesChanged();
+
+    setMaxConcurrent(2);
+    setGlobalMaxSpeed(0);
+    setPauseOnBattery(false);
+    setResumeOnAC(true);
+    setPerHostMaxConcurrent(8);
+    setPersistSensitiveOptions(false);
+    setTelemetryEnabled(true);
+    setDefaultUserAgent(QStringLiteral("raad/1.0"));
+    setDefaultAllowInsecureSsl(false);
+    setDefaultProxyHost(QString());
+    setDefaultProxyPort(0);
+    setDefaultProxyUser(QString());
+    setDefaultProxyPassword(QString());
+    setNetworkTestState(false, QString(), QStringLiteral("muted"));
+
+    if (!m_sessionBackupPath.isEmpty()) {
+        QFile::remove(m_sessionBackupPath);
+    }
+    if (!m_sessionPath.isEmpty()) {
+        QFile::remove(m_sessionPath);
+    }
+    if (!m_telemetryPath.isEmpty()) {
+        QFile::remove(m_telemetryPath);
+    }
+
+    updateTotals();
+    emit countsChanged();
+    saveSession();
+}
+
 void DownloadManager::verifyTask(int index)
 {
     DownloaderTask* task = m_model.taskAt(index);
