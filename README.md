@@ -18,7 +18,7 @@ Raad is a modern, high-performance download manager built with modern **C++20** 
 
 ## Highlights
 - Multi-segment downloads with resume, retry, mirror failover, and per-segment progress
-- Adaptive segment controller based on runtime/network conditions
+- Adaptive segment controller based on runtime/network and main resources like CPU, RAM and HDD/SSD Storage R/W speed conditions
 - Queue policies: concurrency, bandwidth caps, schedules, quotas, and domain routing
 - Per-task/global speed limits, proxy/auth/header/cookie/User-Agent controls, and optional insecure SSL
 - Checksum verification, session persistence, import/export, and post-download actions
