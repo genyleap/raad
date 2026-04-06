@@ -10,6 +10,7 @@ Raad is a modern, high-performance download manager built with modern **C++20** 
 ![C++](https://img.shields.io/badge/C%2B%2B%20Version-20-blue.svg)
 ![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)
 
+![5d3802f2-d94e-4b09-ba74-94910af8ff8c-d1](https://github.com/user-attachments/assets/1cb69065-2441-49e3-ad98-dceca633f97f)
 
 ## 🚧 Project Status
 > Raad is currently **under active development**.  
