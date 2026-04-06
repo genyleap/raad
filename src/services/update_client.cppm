@@ -54,8 +54,8 @@ export module raad.services.update_client;
  *
  * The client supports:
  * - Multiple update sources with configurable preference
- * - Automatic and manual update checks
- * - Optional auto-download behavior
+ * - Automatic startup checks plus manual re-checks
+ * - Configurable automatic vs custom update delivery
  * - Channel-aware filtering (stable, beta, prerelease)
  * - UI-observable progress and status reporting
  *
@@ -71,11 +71,14 @@ RAAD_MODULE_EXPORT class UpdateClient : public QObject {
     //!< @brief Update channel (stable/beta).
     Q_PROPERTY(QString channel READ channel WRITE setChannel NOTIFY channelChanged)
 
-    //!< @brief Auto check for updates.
+    //!< @brief Legacy auto-check toggle retained for compatibility.
     Q_PROPERTY(bool autoCheck READ autoCheck WRITE setAutoCheck NOTIFY autoCheckChanged)
 
-    //!< @brief Auto download updates.
+    //!< @brief Legacy auto-download toggle retained for compatibility.
     Q_PROPERTY(bool autoDownload READ autoDownload WRITE setAutoDownload NOTIFY autoDownloadChanged)
+
+    //!< @brief Update install policy ("automatic" or "custom").
+    Q_PROPERTY(QString updateMode READ updateMode WRITE setUpdateMode NOTIFY updateModeChanged)
 
     //!< @brief Preferred update source (auto/website/github).
     Q_PROPERTY(QString sourcePreference READ sourcePreference WRITE setSourcePreference NOTIFY sourcePreferenceChanged)
@@ -164,6 +167,15 @@ public:
      * @param enabled Whether to auto-download.
      */
     void setAutoDownload(bool enabled);
+
+    //!< @brief Return update mode.
+    QString updateMode() const { return m_updateMode; }
+
+    /**
+     * @brief Set update mode.
+     * @param mode Update mode ("automatic" or "custom").
+     */
+    void setUpdateMode(const QString& mode);
 
     //!< @brief Return preferred update source.
     QString sourcePreference() const { return m_sourcePreference; }
@@ -270,6 +282,9 @@ public:
      */
     Q_INVOKABLE void installUpdate();
 
+    //!< @brief Restore updater settings and cached update state to defaults.
+    Q_INVOKABLE void resetSettingsToDefaults();
+
 
 signals:
     //!< @brief Emitted when channel changes.
@@ -280,6 +295,9 @@ signals:
 
     //!< @brief Emitted when auto-download changes.
     void autoDownloadChanged();
+
+    //!< @brief Emitted when update mode changes.
+    void updateModeChanged();
 
     //!< @brief Emitted when source preference changes.
     void sourcePreferenceChanged();
@@ -336,7 +354,7 @@ private:
     //!< @brief Clear cached update info.
     void resetUpdateInfo();
 
-    //!< @brief Trigger auto-check if enabled.
+    //!< @brief Trigger the startup update check.
     void maybeAutoCheck();
 
     /**
@@ -402,8 +420,9 @@ private:
 
     QString m_currentVersion;                                //!< Current app version.
     QString m_channel = QStringLiteral("stable");            //!< Update channel.
-    bool m_autoCheck = true;                                 //!< Auto-check toggle.
-    bool m_autoDownload = false;                             //!< Auto-download toggle.
+    bool m_autoCheck = true;                                 //!< Legacy auto-check toggle.
+    bool m_autoDownload = false;                             //!< Legacy auto-download toggle.
+    QString m_updateMode = QStringLiteral("custom");         //!< Automatic or custom update mode.
     QString m_sourcePreference = QStringLiteral("auto");     //!< Source preference.
     QString m_githubRepo = QStringLiteral("genyleap/raad");  //!< Default GitHub repo.
     QString m_manifestUrl;                                   //!< Website manifest URL.

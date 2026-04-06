@@ -42,6 +42,13 @@ static QString settingsGroup()
     return QStringLiteral("updates");
 }
 
+static QString normalizeUpdateMode(const QString& mode)
+{
+    const QString normalized = mode.trimmed().toLower();
+    if (normalized == QStringLiteral("automatic")) return normalized;
+    return QStringLiteral("custom");
+}
+
 static QString updatesDirPath()
 {
     const QString appDataDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
@@ -174,10 +181,32 @@ void UpdateClient::setAutoCheck(bool enabled)
 
 void UpdateClient::setAutoDownload(bool enabled)
 {
-    if (m_autoDownload == enabled) return;
+    const QString nextMode = enabled ? QStringLiteral("automatic") : QStringLiteral("custom");
+    const bool modeChanged = (m_updateMode != nextMode);
+    if (m_autoDownload == enabled && !modeChanged) return;
     m_autoDownload = enabled;
+    m_updateMode = nextMode;
     saveSettings();
     emit autoDownloadChanged();
+    if (modeChanged) {
+        emit updateModeChanged();
+    }
+}
+
+void UpdateClient::setUpdateMode(const QString& mode)
+{
+    const QString next = normalizeUpdateMode(mode);
+    const bool nextAutoDownload = (next == QStringLiteral("automatic"));
+    if (m_updateMode == next && m_autoDownload == nextAutoDownload) return;
+
+    const bool autoDownloadToggled = (m_autoDownload != nextAutoDownload);
+    m_updateMode = next;
+    m_autoDownload = nextAutoDownload;
+    saveSettings();
+    emit updateModeChanged();
+    if (autoDownloadToggled) {
+        emit autoDownloadChanged();
+    }
 }
 
 void UpdateClient::setSourcePreference(const QString& source)
@@ -476,13 +505,78 @@ void UpdateClient::installUpdate()
     QTimer::singleShot(250, []() { QCoreApplication::quit(); });
 }
 
+void UpdateClient::resetSettingsToDefaults()
+{
+    if (m_activeReply) {
+        m_activeReply->abort();
+        m_activeReply->deleteLater();
+        m_activeReply = nullptr;
+    }
+    if (m_downloadReply) {
+        m_downloadReply->abort();
+        m_downloadReply->deleteLater();
+        m_downloadReply = nullptr;
+    }
+    if (m_downloadFile) {
+        if (m_downloadFile->isOpen()) {
+            m_downloadFile->close();
+        }
+        m_downloadFile->deleteLater();
+        m_downloadFile = nullptr;
+    }
+
+    QSettings settings;
+    settings.beginGroup(settingsGroup());
+    settings.remove(QString());
+    settings.endGroup();
+
+    const QString updatesDirValue = updatesDirPath();
+    if (!updatesDirValue.trimmed().isEmpty()) {
+        QDir updatesDir(updatesDirValue);
+        if (updatesDir.exists()) {
+            updatesDir.removeRecursively();
+        }
+    }
+
+    m_channel = QStringLiteral("stable");
+    m_autoCheck = true;
+    m_autoDownload = false;
+    m_updateMode = QStringLiteral("custom");
+    m_sourcePreference = QStringLiteral("auto");
+    m_githubRepo = QStringLiteral("genyleap/raad");
+    m_manifestUrl.clear();
+    m_requireSignature = false;
+    m_publicKeyPath.clear();
+
+    resetUpdateInfo();
+    setError(QString());
+    setStatus(QStringLiteral("Update settings restored to defaults"));
+
+    emit channelChanged();
+    emit autoCheckChanged();
+    emit autoDownloadChanged();
+    emit updateModeChanged();
+    emit sourcePreferenceChanged();
+    emit githubRepoChanged();
+    emit manifestUrlChanged();
+    emit signaturePolicyChanged();
+    emit publicKeyPathChanged();
+}
+
 void UpdateClient::loadSettings()
 {
     QSettings settings;
     settings.beginGroup(settingsGroup());
     m_channel = settings.value(QStringLiteral("channel"), m_channel).toString();
-    m_autoCheck = settings.value(QStringLiteral("autoCheck"), m_autoCheck).toBool();
-    m_autoDownload = settings.value(QStringLiteral("autoDownload"), m_autoDownload).toBool();
+    if (settings.contains(QStringLiteral("updateMode"))) {
+        m_updateMode = normalizeUpdateMode(settings.value(QStringLiteral("updateMode")).toString());
+    } else {
+        m_updateMode = settings.value(QStringLiteral("autoDownload"), m_autoDownload).toBool()
+            ? QStringLiteral("automatic")
+            : QStringLiteral("custom");
+    }
+    m_autoCheck = true;
+    m_autoDownload = (m_updateMode == QStringLiteral("automatic"));
     m_sourcePreference = settings.value(QStringLiteral("sourcePreference"), m_sourcePreference).toString().trimmed().toLower();
     if (m_sourcePreference.isEmpty()) m_sourcePreference = QStringLiteral("auto");
     m_githubRepo = settings.value(QStringLiteral("githubRepo"), m_githubRepo).toString();
@@ -497,8 +591,9 @@ void UpdateClient::saveSettings()
     QSettings settings;
     settings.beginGroup(settingsGroup());
     settings.setValue(QStringLiteral("channel"), m_channel);
-    settings.setValue(QStringLiteral("autoCheck"), m_autoCheck);
+    settings.remove(QStringLiteral("autoCheck"));
     settings.setValue(QStringLiteral("autoDownload"), m_autoDownload);
+    settings.setValue(QStringLiteral("updateMode"), m_updateMode);
     settings.setValue(QStringLiteral("sourcePreference"), m_sourcePreference);
     settings.setValue(QStringLiteral("githubRepo"), m_githubRepo);
     settings.setValue(QStringLiteral("manifestUrl"), m_manifestUrl);
@@ -590,7 +685,6 @@ void UpdateClient::resetUpdateInfo()
 
 void UpdateClient::maybeAutoCheck()
 {
-    if (!m_autoCheck) return;
     checkNow();
 }
 
@@ -733,7 +827,7 @@ void UpdateClient::handleManifestJson(const QJsonDocument& doc)
         } else {
             setStatus(m_updateAvailable ? QStringLiteral("Update available") : QStringLiteral("Up to date"));
         }
-        if (m_updateAvailable && m_autoDownload) {
+        if (m_updateAvailable && m_updateMode == QStringLiteral("automatic")) {
             downloadUpdate();
         }
         return;
@@ -803,7 +897,7 @@ void UpdateClient::handleGitHubJson(const QJsonDocument& doc, bool allowPrerelea
     } else {
         setStatus(m_updateAvailable ? QStringLiteral("Update available") : QStringLiteral("Up to date"));
     }
-    if (m_updateAvailable && m_autoDownload) {
+    if (m_updateAvailable && m_updateMode == QStringLiteral("automatic")) {
         downloadUpdate();
     }
 }
