@@ -17,12 +17,22 @@ Raad is a modern, high-performance download manager built with modern **C++20** 
 
 
 ## Highlights
-- High-performance multi-segment downloads with resume support  
-- File integrity verification (hash-based)  
-- Clean and modular C++20 codebase  
-- Integrated with Geny token & blockchain for future features
-- Designed for a modern QML-based UI *(coming soon)*
+- Multi-segment downloads with resume, retry, mirror failover, and per-segment progress
+- Adaptive segment controller based on runtime/network conditions
+- Queue policies: concurrency, bandwidth caps, schedules, quotas, and domain routing
+- Per-task/global speed limits, proxy/auth/header/cookie/User-Agent controls, and optional insecure SSL
+- Checksum verification, session persistence, import/export, and post-download actions
+- Power-aware behavior, runtime telemetry, URL probe, and integrated update client
 
+## Highlights (Not Actually Implemented Yet)
+
+- Speed and network tester module
+- $Geny token and NFTs blockchain integration
+- Application store for better maintenance (To keep requirements and installed files up to date)
+- Auto platform and file detector
+- Torrent and magnet backend support
+- Advanced remote terminal repo updater
+- Support YouTube and social multimedia features
 
 ## Tech Stack
 - C++20 / CMake
