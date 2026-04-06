@@ -18,7 +18,7 @@ import Raad
 T.Button {
     id: control
 
-    property bool isDefault : true
+    property bool isDefault : false
     property bool isBold : false
 
     property string setIconBegin : ""

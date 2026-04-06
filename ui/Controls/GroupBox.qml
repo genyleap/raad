@@ -25,10 +25,10 @@ T.GroupBox {
     property string statusLevel : "Active"
 
     // Card padding
-    leftPadding: Metrics.padding
-    rightPadding: Metrics.padding
-    topPadding: Metrics.padding + _titleH
-    bottomPadding: Metrics.padding
+    leftPadding: Metrics.padding + 8
+    rightPadding: Metrics.padding + 8
+    topPadding: Metrics.padding + _titleH + 8
+    bottomPadding: Metrics.padding + 8
     spacing: Metrics.padding
     property bool focusable : false
 

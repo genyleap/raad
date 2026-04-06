@@ -956,7 +956,7 @@ private:
     bool ensureDiskCapacity(qint64 totalSizeBytes, qint64 alreadyHaveBytes, QString* why = nullptr) const;
 
     //!< @brief Parse start offset from a Content-Range header.
-    qint64 parseContentRangeStart(const QByteArray& contentRange) const;
+    [[nodiscard]] qint64 parseContentRangeStart(const QByteArray& contentRange) const;
 
     //!< @brief Set structured error state.
     void recordError(const QString& category,
