@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Genyleap LLC.
+# SPDX-License-Identifier: LicenseRef-Geny-Commercial OR MIT
+
 cmake_minimum_required(VERSION 3.28)
 
 # -------------------------
@@ -17,6 +20,32 @@ project(${PROJECT_NAME} VERSION ${PROJECT_VERSION} LANGUAGES CXX)
 if(POLICY CMP0155)
     cmake_policy(SET CMP0155 NEW)
 endif()
+
+set(RAAD_VENDOR "Genyleap")
+set(RAAD_PACKAGE_CONTACT "info@genyleap.com")
+set(RAAD_PACKAGE_SUMMARY "RAAD Internet Download Manager")
+set(RAAD_COPYRIGHT "Copyright 2026 by Genyleap LLC")
+set(RAAD_BUNDLE_IDENTIFIER "com.genyleap.raad")
+set(RAAD_MACOS_ICON_FILE "Raad.icns")
+set(RAAD_MACOS_ICON_ICNS "${CMAKE_CURRENT_SOURCE_DIR}/Raad.icns")
+set(RAAD_WINDOWS_ICON_ICO "${CMAKE_CURRENT_SOURCE_DIR}/Raad.ico")
+set(RAAD_LINUX_ICON_PNG "${CMAKE_CURRENT_SOURCE_DIR}/Raad.png")
+set(RAAD_MACOS_DEPLOYMENT_TARGET "15.1")
+set(RAAD_MACOS_INFO_PLIST_IN "${CMAKE_CURRENT_SOURCE_DIR}/properties/macOS/Info.plist.in")
+set(RAAD_MACOS_INFO_PLIST "${CMAKE_CURRENT_BINARY_DIR}/generated/Info.plist")
+set(RAAD_WINDOWS_RC_IN "${CMAKE_CURRENT_SOURCE_DIR}/properties/Windows/app.rc")
+set(RAAD_WINDOWS_RC "${CMAKE_CURRENT_BINARY_DIR}/generated/raad_app.rc")
+set(RAAD_RC_FILE_VERSION "${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0")
+set(RAAD_RC_PRODUCT_VERSION "${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0")
+
+if(APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "${RAAD_MACOS_DEPLOYMENT_TARGET}" CACHE STRING "Minimum macOS version")
+endif()
+
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
+file(TO_NATIVE_PATH "${RAAD_WINDOWS_ICON_ICO}" RAAD_WINDOWS_ICON_ICO_RC)
+configure_file("${RAAD_MACOS_INFO_PLIST_IN}" "${RAAD_MACOS_INFO_PLIST}" @ONLY)
+configure_file("${RAAD_WINDOWS_RC_IN}" "${RAAD_WINDOWS_RC}" @ONLY)
 
 # -------------------------
 # macOS SDK (needed for Homebrew LLVM)
@@ -290,7 +319,7 @@ if(CMAKE_PREFIX_PATH)
     set(CMAKE_PREFIX_PATH "${CMAKE_PREFIX_PATH}" CACHE STRING "Qt search prefixes" FORCE)
 endif()
 
-find_package(Qt6 REQUIRED COMPONENTS Quick QuickControls2 Network Concurrent Gui)
+find_package(Qt6 REQUIRED COMPONENTS Core Quick QuickControls2 Network Concurrent Gui)
 
 qt_standard_project_setup(REQUIRES 6.8)
 
@@ -298,6 +327,14 @@ qt_add_executable(${APP_NAME}
     WIN32
     MACOSX_BUNDLE
     src/core/main.cpp
+)
+
+add_executable(RaadUpdaterHelper
+    src/updaterhelper/main.cpp
+)
+target_link_libraries(RaadUpdaterHelper PRIVATE Qt6::Core)
+set_target_properties(RaadUpdaterHelper PROPERTIES
+    OUTPUT_NAME "RaadUpdaterHelper"
 )
 
 # ---- QML Files ----
@@ -310,9 +347,11 @@ set(qml_core
         "ui/Core/Theme.qml"
         "ui/Core/Animations.qml"
         "ui/Core/Elevation.qml"
+        "ui/Core/Shadow.qml"
 )
 set(qml_controls
         "ui/Controls/Avatar.qml"
+        "ui/Controls/AlphaGlass.qml"
         "ui/Controls/Card.qml"
         "ui/Controls/HorizontalLine.qml"
         "ui/Controls/HorizontalSpacer.qml"
@@ -329,8 +368,19 @@ set(qml_controls
         "ui/Controls/TextField.qml"
         "ui/Controls/TextArea.qml"
         "ui/Controls/ComboBox.qml"
+        "ui/Controls/CheckBox.qml"
+        "ui/Controls/Dialog.qml"
         "ui/Controls/SpinBox.qml"
         "ui/Controls/ProgressBar.qml"
+        "ui/Controls/AppMenuBar.qml"
+        "ui/Controls/AppMenuBarItem.qml"
+        "ui/Controls/AppMenu.qml"
+        "ui/Controls/AppMenuItem.qml"
+        "ui/Controls/AppMenuSeparator.qml"
+        "ui/Controls/AppMenuTrigger.qml"
+        "ui/Controls/CommandActionButton.qml"
+        "ui/Controls/CommandAddUrlButton.qml"
+        "ui/Controls/SidebarTreeItem.qml"
         "ui/Controls/LayoutButton.qml"
         "ui/Controls/Switch.qml"
         "ui/Controls/MiniButton.qml"
@@ -345,10 +395,17 @@ set(qml_controls
         "ui/Controls/BlurPopupSurface.qml"
         "ui/Controls/FootMenu.qml"
         "ui/Controls/FootButton.qml"
+        "ui/Controls/GroupBox.qml"
         "ui/Controls/Image.qml"
         "ui/Controls/DownloadDelegate.qml"
         "ui/Controls/DownloadListView.qml"
+        "ui/Controls/DownloadDetailsDialog.qml"
+        "ui/Controls/DownloadDetailsWindow.qml"
         "ui/Controls/AddDownloadDialog.qml"
+        "ui/Controls/HorizontalLine.qml"
+        "ui/Controls/HorizontalSpacer.qml"
+        "ui/Controls/VerticalLine.qml"
+        "ui/Controls/VerticalSpacer.qml"
 )
 set(qml_layout
         "ui/Layout/Footer.qml"
@@ -398,11 +455,17 @@ raad_filter_existing(qml_singletons_existing ${qml_singletons})
 set_source_files_properties(${qml_singletons_existing} PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 
 set(qml_resource_files
-       "ui/Resources/fonts/Inter_24pt-Medium.ttf"
-       "ui/Resources/fonts/fa-brands-400.woff2"
-       "ui/Resources/fonts/fa-regular-400.woff2"
-       "ui/Resources/fonts/fa-solid-900.woff2"
-       "ui/Resources/image/avatar.svg"
+       "Raad.png"
+       "resources/fonts/Inter-Medium.ttf"
+       "resources/fonts/IRANSansX-Regular.ttf"
+       "resources/fonts/Font Awesome 6 Brands-Regular-400.otf"
+       "resources/fonts/Font Awesome 6 Pro-Regular-400.otf"
+       "resources/fonts/Font Awesome 6 Pro-Solid-900.otf"
+       "resources/fonts/Font Awesome 6 Pro-Thin-100.otf"
+       "resources/fonts/Font Awesome 6 Pro-Light-300.otf"
+       "resources/fonts/Font Awesome 6 Duotone-Light-300.otf"
+
+       "resources/image/avatar.svg"
 )
 raad_filter_existing(qml_resource_files_existing ${qml_resource_files})
 
@@ -452,6 +515,7 @@ qt_add_qml_module(${APP_NAME}
 
         SOURCES
         ${RAAD_IMPL_SOURCES}
+        QML_FILES ui/utils.js
 )
 
 if(RAAD_USE_MODULES)
@@ -474,19 +538,42 @@ endif()
 # explicit, fixed bundle identifier manually though.
 if(APPLE)
     set_target_properties(${APP_NAME} PROPERTIES
+        MACOSX_BUNDLE_GUI_IDENTIFIER ${RAAD_BUNDLE_IDENTIFIER}
         MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
-        MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
+        MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION}
         MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_ICON_FILE "Raad.icns"
+        MACOSX_BUNDLE_INFO_PLIST "${RAAD_MACOS_INFO_PLIST}"
     )
+    if(EXISTS "${RAAD_MACOS_ICON_ICNS}")
+        set_source_files_properties("${RAAD_MACOS_ICON_ICNS}" PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+        target_sources(${APP_NAME} PRIVATE "${RAAD_MACOS_ICON_ICNS}")
+    endif()
 elseif(WIN32)
     set_target_properties(${APP_NAME} PROPERTIES
         WIN32_EXECUTABLE TRUE
     )
+    if(EXISTS "${RAAD_WINDOWS_RC}")
+        target_sources(${APP_NAME} PRIVATE "${RAAD_WINDOWS_RC}")
+    endif()
 endif()
 
 target_link_libraries(${APP_NAME}
     PRIVATE Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Concurrent
 )
+
+add_dependencies(${APP_NAME} RaadUpdaterHelper)
+add_custom_command(TARGET RaadUpdaterHelper POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:RaadUpdaterHelper>
+            $<TARGET_FILE_DIR:${APP_NAME}>/$<TARGET_FILE_NAME:RaadUpdaterHelper>
+)
+
+if(WIN32 AND MSVC)
+    target_link_options(RaadUpdaterHelper PRIVATE
+        "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'"
+    )
+endif()
 
 target_compile_definitions(${APP_NAME}
     PRIVATE APP_VERSION="${PROJECT_VERSION}"
@@ -499,7 +586,7 @@ target_include_directories(${APP_NAME}
 option(RAAD_BUILD_TESTS "Build backend tests" ON)
 if(RAAD_BUILD_TESTS)
     enable_testing()
-    find_package(Qt6 REQUIRED COMPONENTS Test Gui)
+    find_package(Qt6 REQUIRED COMPONENTS Core Test Gui)
 
     qt_add_executable(raad_backend_tests
         tests/backend_tests.cpp
@@ -542,15 +629,50 @@ if(APPLE)
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     )
+    install(FILES $<TARGET_FILE:RaadUpdaterHelper>
+        DESTINATION ${APP_NAME}.app/Contents/MacOS
+    )
 elseif(WIN32)
     install(TARGETS ${APP_NAME}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     )
+    install(TARGETS RaadUpdaterHelper
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
 else()
     install(TARGETS ${APP_NAME}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     )
+    install(TARGETS RaadUpdaterHelper
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+    if(EXISTS "${RAAD_LINUX_ICON_PNG}")
+        install(FILES "${RAAD_LINUX_ICON_PNG}"
+            DESTINATION share/icons/hicolor/512x512/apps
+            RENAME raad.png
+        )
+    endif()
 endif()
+
+set(CPACK_PACKAGE_NAME "${PROJECT_NAME}")
+set(CPACK_PACKAGE_VENDOR "${RAAD_VENDOR}")
+set(CPACK_PACKAGE_CONTACT "${RAAD_PACKAGE_CONTACT}")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${RAAD_PACKAGE_SUMMARY}")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_FILE_NAME "${PROJECT_NAME}-${PROJECT_VERSION}")
+
+if(WIN32)
+    set(CPACK_GENERATOR "NSIS;ZIP")
+    set(CPACK_NSIS_DISPLAY_NAME "${APP_NAME}")
+    set(CPACK_NSIS_PACKAGE_NAME "${APP_NAME}")
+    set(CPACK_PACKAGE_INSTALL_DIRECTORY "${APP_NAME}")
+elseif(APPLE)
+    set(CPACK_GENERATOR "DragNDrop")
+else()
+    set(CPACK_GENERATOR "TGZ")
+endif()
+
+include(CPack)

@@ -1,13 +1,17 @@
 module;
+#include <QByteArrayView>
 #include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
 #include <QEventLoop>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonParseError>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -18,6 +22,13 @@ module;
 #include <QTimer>
 #include <QUrl>
 #include <QSettings>
+
+#if defined(Q_OS_WIN)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 module raad.services.update_client;
 
@@ -31,6 +42,104 @@ static QString settingsGroup()
     return QStringLiteral("updates");
 }
 
+static QString updatesDirPath()
+{
+    const QString appDataDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (appDataDir.trimmed().isEmpty()) return QString();
+    return QDir(appDataDir).filePath(QStringLiteral("updates"));
+}
+
+static QString appUpdaterHelperPath()
+{
+#if defined(Q_OS_WIN)
+    return QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("RaadUpdaterHelper.exe"));
+#else
+    return QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("RaadUpdaterHelper"));
+#endif
+}
+
+static bool copyWithOverwrite(const QString& fromPath, const QString& toPath)
+{
+    if (QFileInfo::exists(toPath) && !QFile::remove(toPath)) {
+        return false;
+    }
+    return QFile::copy(fromPath, toPath);
+}
+
+static bool looksLikeManualInstaller(const QString& path)
+{
+    const QString lower = QFileInfo(path).fileName().toLower();
+    return lower.endsWith(QStringLiteral(".dmg"))
+        || lower.endsWith(QStringLiteral(".pkg"))
+        || lower.endsWith(QStringLiteral(".msi"))
+        || lower.endsWith(QStringLiteral(".zip"))
+        || lower.endsWith(QStringLiteral(".tar.gz"))
+        || lower.endsWith(QStringLiteral(".tar.xz"))
+        || lower.endsWith(QStringLiteral(".deb"))
+        || lower.endsWith(QStringLiteral(".rpm"))
+        || lower.endsWith(QStringLiteral(".exe"));
+}
+
+static bool isSelfInstallSupportedAsset(const QString& currentExecutablePath, const QString& downloadedPath)
+{
+    const QFileInfo currentInfo(currentExecutablePath);
+    const QFileInfo downloadedInfo(downloadedPath);
+    const QString currentName = currentInfo.fileName().toLower();
+    const QString downloadedName = downloadedInfo.fileName().toLower();
+
+    if (!currentName.isEmpty() && downloadedName == currentName) {
+        return true;
+    }
+    if (downloadedName.endsWith(QStringLiteral(".appimage"))) {
+        return true;
+    }
+    if (looksLikeManualInstaller(downloadedPath)) {
+        return false;
+    }
+#if defined(Q_OS_WIN)
+    return downloadedName.endsWith(QStringLiteral(".exe"))
+        && !downloadedName.contains(QStringLiteral("setup"))
+        && !downloadedName.contains(QStringLiteral("installer"));
+#else
+    return downloadedInfo.suffix().isEmpty();
+#endif
+}
+
+static bool startUpdaterHelperDetached(const QString& helperPath, const QString& jobPath, QString* errorOut)
+{
+#if defined(Q_OS_WIN)
+    const QString nativeHelper = QDir::toNativeSeparators(helperPath);
+    const QString nativeJob = QDir::toNativeSeparators(jobPath);
+    if (QProcess::startDetached(helperPath, {QStringLiteral("--job"), jobPath})) {
+        return true;
+    }
+
+    const QString args = QStringLiteral("--job \"%1\"").arg(nativeJob);
+    const int rc = static_cast<int>(reinterpret_cast<qintptr>(
+        ShellExecuteW(nullptr,
+                      L"runas",
+                      reinterpret_cast<LPCWSTR>(nativeHelper.utf16()),
+                      reinterpret_cast<LPCWSTR>(args.utf16()),
+                      nullptr,
+                      SW_SHOWNORMAL)));
+    if (rc <= 32) {
+        if (errorOut) {
+            *errorOut = (rc == 1223)
+                ? QStringLiteral("Administrator permission was denied.")
+                : QStringLiteral("Failed to launch updater helper (code %1).").arg(rc);
+        }
+        return false;
+    }
+    return true;
+#else
+    const bool launched = QProcess::startDetached(helperPath, {QStringLiteral("--job"), jobPath});
+    if (!launched && errorOut) {
+        *errorOut = QStringLiteral("Failed to launch updater helper.");
+    }
+    return launched;
+#endif
+}
+
 UpdateClient::UpdateClient(QObject* parent)
     : QObject(parent)
 {
@@ -39,6 +148,7 @@ UpdateClient::UpdateClient(QObject* parent)
         m_currentVersion = QStringLiteral("0.0.0");
     }
     loadSettings();
+    consumePendingUpdateStatus();
 
     connect(&m_autoTimer, &QTimer::timeout, this, &UpdateClient::maybeAutoCheck);
     m_autoTimer.setSingleShot(true);
@@ -120,6 +230,11 @@ void UpdateClient::setPublicKeyPath(const QString& path)
 
 void UpdateClient::checkNow()
 {
+    if (m_downloadReply) {
+        setStatus(QStringLiteral("Updater busy"));
+        setError(QStringLiteral("A download is already in progress"));
+        return;
+    }
     if (m_activeReply) {
         m_activeReply->abort();
         m_activeReply->deleteLater();
@@ -190,7 +305,7 @@ void UpdateClient::downloadUpdate()
     if (baseDir.isEmpty()) baseDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
     if (baseDir.isEmpty()) baseDir = QDir::tempPath();
 
-    const QString targetPath = QDir(baseDir).filePath(fileName);
+    const QString targetPath = utils::uniqueFilePath(QDir(baseDir).filePath(fileName));
     if (m_downloadFile) {
         delete m_downloadFile;
         m_downloadFile = nullptr;
@@ -205,6 +320,8 @@ void UpdateClient::downloadUpdate()
     }
 
     QNetworkRequest req{QUrl(m_downloadUrl)};
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    req.setTransferTimeout(30000);
     req.setRawHeader("User-Agent", "raad/1.0");
     m_downloadReply = m_net.get(req);
 
@@ -249,14 +366,22 @@ void UpdateClient::downloadUpdate()
         }
         m_downloadedPath = targetPath;
         emit downloadReadyChanged();
-        setStatus(QStringLiteral("Update downloaded"));
+        if (m_expectedSha256.trimmed().isEmpty()) {
+            setStatus(QStringLiteral("Update downloaded, but release checksum is missing"));
+        } else if (m_requireSignature && m_signatureVerified) {
+            setStatus(QStringLiteral("Update downloaded and verified"));
+        } else {
+            setStatus(QStringLiteral("Update downloaded"));
+        }
     });
 }
 
 void UpdateClient::installUpdate()
 {
-    if (m_downloadedPath.isEmpty()) {
-        setError(QStringLiteral("No downloaded update"));
+    const QString path = m_downloadedPath.trimmed();
+    if (path.isEmpty() || !QFileInfo::exists(path)) {
+        setError(QStringLiteral("Downloaded update file was not found"));
+        setStatus(QStringLiteral("Install failed"));
         return;
     }
     if (m_requireSignature && !m_signatureVerified) {
@@ -265,16 +390,90 @@ void UpdateClient::installUpdate()
         return;
     }
 
-    const QString path = m_downloadedPath;
-    setStatus(QStringLiteral("Launching installer..."));
+    const QString currentExe = QCoreApplication::applicationFilePath();
+    if (!isSelfInstallSupportedAsset(currentExe, path)) {
+        setError(QString());
+        setStatus(QStringLiteral("Opening installer..."));
+        if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path))) {
+            setError(QStringLiteral("Failed to open installer"));
+            setStatus(QStringLiteral("Install failed"));
+        }
+        return;
+    }
 
-#if defined(Q_OS_WIN)
-    QProcess::startDetached(path, {});
-#elif defined(Q_OS_MAC)
-    QDesktopServices::openUrl(QUrl::fromLocalFile(path));
-#else
-    QDesktopServices::openUrl(QUrl::fromLocalFile(path));
-#endif
+    const QString expectedSha256 = utils::normalizeChecksum(m_expectedSha256);
+    if (utils::detectChecksumAlgo(expectedSha256) != QStringLiteral("SHA256")) {
+        setError(QStringLiteral("Release does not provide trusted SHA-256 metadata for this asset"));
+        setStatus(QStringLiteral("Install blocked"));
+        return;
+    }
+
+    const QString downloadedHash = utils::normalizeChecksum(sha256ForFile(path));
+    if (downloadedHash.isEmpty() || downloadedHash != expectedSha256) {
+        setError(QStringLiteral("Downloaded update hash verification failed"));
+        setStatus(QStringLiteral("Install failed"));
+        return;
+    }
+
+    const QString helperPath = appUpdaterHelperPath();
+    if (!QFileInfo::exists(helperPath)) {
+        setError(QStringLiteral("Updater helper executable not found"));
+        setStatus(QStringLiteral("Install failed"));
+        return;
+    }
+
+    const QString updatesDir = updatesDirPath();
+    if (updatesDir.trimmed().isEmpty()) {
+        setError(QStringLiteral("Could not resolve update workspace"));
+        setStatus(QStringLiteral("Install failed"));
+        return;
+    }
+    QDir().mkpath(updatesDir);
+
+    const QString stagedPath = QDir(updatesDir).filePath(QStringLiteral("staged-%1").arg(QFileInfo(path).fileName()));
+    if (!copyWithOverwrite(path, stagedPath)) {
+        setError(QStringLiteral("Failed to stage update file"));
+        setStatus(QStringLiteral("Install failed"));
+        return;
+    }
+
+    const QString backupPath = currentExe + QStringLiteral(".backup.old");
+    const QString jobPath = QDir(updatesDir).filePath(
+        QStringLiteral("update-job-%1.json").arg(QString::number(QDateTime::currentMSecsSinceEpoch())));
+
+    QJsonObject job;
+    job.insert(QStringLiteral("pid"), static_cast<qint64>(QCoreApplication::applicationPid()));
+    job.insert(QStringLiteral("current_executable"), currentExe);
+    job.insert(QStringLiteral("staged_executable"), stagedPath);
+    job.insert(QStringLiteral("backup_executable"), backupPath);
+    job.insert(QStringLiteral("working_directory"), QCoreApplication::applicationDirPath());
+    job.insert(QStringLiteral("expected_sha256"), expectedSha256);
+    job.insert(QStringLiteral("cleanup_source_on_success"), true);
+    job.insert(QStringLiteral("timeout_ms"), 45000);
+    job.insert(QStringLiteral("args"), QJsonArray());
+
+    QFile jobFile(jobPath);
+    if (!jobFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        QFile::remove(stagedPath);
+        setError(QStringLiteral("Failed to write update job file"));
+        setStatus(QStringLiteral("Install failed"));
+        return;
+    }
+    jobFile.write(QJsonDocument(job).toJson(QJsonDocument::Indented));
+    jobFile.close();
+
+    QString launchError;
+    if (!startUpdaterHelperDetached(helperPath, jobPath, &launchError)) {
+        QFile::remove(jobPath);
+        QFile::remove(stagedPath);
+        setError(launchError.isEmpty() ? QStringLiteral("Failed to launch updater helper") : launchError);
+        setStatus(QStringLiteral("Install failed"));
+        return;
+    }
+
+    setError(QString());
+    setStatus(QStringLiteral("Installing update and restarting..."));
+    QTimer::singleShot(250, []() { QCoreApplication::quit(); });
 }
 
 void UpdateClient::loadSettings()
@@ -306,6 +505,53 @@ void UpdateClient::saveSettings()
     settings.setValue(QStringLiteral("requireSignature"), m_requireSignature);
     settings.setValue(QStringLiteral("publicKeyPath"), m_publicKeyPath);
     settings.endGroup();
+}
+
+void UpdateClient::consumePendingUpdateStatus()
+{
+    const QString updatesDirValue = updatesDirPath();
+    if (updatesDirValue.trimmed().isEmpty()) return;
+
+    QDir updatesDir(updatesDirValue);
+    if (!updatesDir.exists()) return;
+
+    const QFileInfoList statusFiles = updatesDir.entryInfoList(
+        QStringList() << QStringLiteral("update-job-*.json.status.json"),
+        QDir::Files,
+        QDir::Time | QDir::Reversed);
+    if (statusFiles.isEmpty()) return;
+
+    const QFileInfo latest = statusFiles.last();
+    QFile statusFile(latest.absoluteFilePath());
+    if (!statusFile.open(QIODevice::ReadOnly)) {
+        QFile::remove(latest.absoluteFilePath());
+        return;
+    }
+
+    QJsonParseError parseError;
+    const QJsonDocument doc = QJsonDocument::fromJson(statusFile.readAll(), &parseError);
+    statusFile.close();
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+        QFile::remove(latest.absoluteFilePath());
+        return;
+    }
+
+    const QJsonObject root = doc.object();
+    const bool ok = root.value(QStringLiteral("ok")).toBool(false);
+    const QString message = root.value(QStringLiteral("message")).toString().trimmed();
+    if (ok) {
+        setError(QString());
+        setStatus(message.isEmpty()
+                      ? QStringLiteral("Update applied successfully")
+                      : QStringLiteral("Update: %1").arg(message));
+    } else {
+        setError(message.isEmpty() ? QStringLiteral("Updater helper failed") : message);
+        setStatus(QStringLiteral("Install failed"));
+    }
+
+    for (const QFileInfo& fileInfo : statusFiles) {
+        QFile::remove(fileInfo.absoluteFilePath());
+    }
 }
 
 void UpdateClient::setStatus(const QString& status)
@@ -352,6 +598,8 @@ void UpdateClient::checkWebsiteManifest()
 {
     setStatus(QStringLiteral("Checking website manifest..."));
     QNetworkRequest req{QUrl(m_manifestUrl)};
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    req.setTransferTimeout(12000);
     req.setRawHeader("User-Agent", "raad/1.0");
     m_activeReply = m_net.get(req);
     connect(m_activeReply, &QNetworkReply::finished, this, [this]() {
@@ -396,6 +644,8 @@ void UpdateClient::checkGitHubReleases()
     }
 
     QNetworkRequest req{QUrl(url)};
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    req.setTransferTimeout(12000);
     req.setRawHeader("User-Agent", "raad/1.0");
     m_activeReply = m_net.get(req);
     connect(m_activeReply, &QNetworkReply::finished, this, [this, allowPrerelease]() {
@@ -452,12 +702,7 @@ void UpdateClient::handleManifestJson(const QJsonDocument& doc)
         QJsonArray assets = obj.value(QStringLiteral("assets")).toArray();
         const QString assetUrl = selectAssetUrl(assets);
         const QJsonObject assetObj = assetByUrl(assets, assetUrl);
-        QString expectedSha = assetObj.value(QStringLiteral("sha256")).toString().trimmed();
-        if (expectedSha.isEmpty()) expectedSha = assetObj.value(QStringLiteral("checksum")).toString().trimmed();
-        if (expectedSha.isEmpty()) expectedSha = assetObj.value(QStringLiteral("hash")).toString().trimmed();
-        if (expectedSha.startsWith(QStringLiteral("sha256:"), Qt::CaseInsensitive)) {
-            expectedSha = expectedSha.mid(QStringLiteral("sha256:").size()).trimmed();
-        }
+        const QString expectedSha = resolveExpectedSha256(assets, assetObj, assetUrl);
         QString signatureUrl = assetObj.value(QStringLiteral("signature")).toString().trimmed();
         if (signatureUrl.isEmpty()) signatureUrl = assetObj.value(QStringLiteral("sig")).toString().trimmed();
         if (signatureUrl.isEmpty()) signatureUrl = assetObj.value(QStringLiteral("signatureUrl")).toString().trimmed();
@@ -483,7 +728,11 @@ void UpdateClient::handleManifestJson(const QJsonDocument& doc)
         const int cmp = utils::compareVersions(m_currentVersion, version);
         m_updateAvailable = (cmp < 0);
         emit updateAvailableChanged();
-        setStatus(m_updateAvailable ? QStringLiteral("Update available") : QStringLiteral("Up to date"));
+        if (m_updateAvailable && m_expectedSha256.trimmed().isEmpty()) {
+            setStatus(QStringLiteral("Update available, but checksum metadata is missing"));
+        } else {
+            setStatus(m_updateAvailable ? QStringLiteral("Update available") : QStringLiteral("Up to date"));
+        }
         if (m_updateAvailable && m_autoDownload) {
             downloadUpdate();
         }
@@ -523,12 +772,7 @@ void UpdateClient::handleGitHubJson(const QJsonDocument& doc, bool allowPrerelea
     const QJsonArray assets = rel.value(QStringLiteral("assets")).toArray();
     const QString assetUrl = selectAssetUrl(assets);
     const QJsonObject assetObj = assetByUrl(assets, assetUrl);
-    QString expectedSha = assetObj.value(QStringLiteral("sha256")).toString().trimmed();
-    if (expectedSha.isEmpty()) expectedSha = assetObj.value(QStringLiteral("checksum")).toString().trimmed();
-    if (expectedSha.isEmpty()) expectedSha = assetObj.value(QStringLiteral("hash")).toString().trimmed();
-    if (expectedSha.startsWith(QStringLiteral("sha256:"), Qt::CaseInsensitive)) {
-        expectedSha = expectedSha.mid(QStringLiteral("sha256:").size()).trimmed();
-    }
+    const QString expectedSha = resolveExpectedSha256(assets, assetObj, assetUrl);
     QString signatureUrl = assetObj.value(QStringLiteral("signature")).toString().trimmed();
     if (signatureUrl.isEmpty()) signatureUrl = assetObj.value(QStringLiteral("sig")).toString().trimmed();
     if (signatureUrl.isEmpty()) signatureUrl = assetObj.value(QStringLiteral("signatureUrl")).toString().trimmed();
@@ -554,7 +798,11 @@ void UpdateClient::handleGitHubJson(const QJsonDocument& doc, bool allowPrerelea
     const int cmp = utils::compareVersions(m_currentVersion, version);
     m_updateAvailable = (cmp < 0);
     emit updateAvailableChanged();
-    setStatus(m_updateAvailable ? QStringLiteral("Update available") : QStringLiteral("Up to date"));
+    if (m_updateAvailable && m_expectedSha256.trimmed().isEmpty()) {
+        setStatus(QStringLiteral("Update available, but checksum metadata is missing"));
+    } else {
+        setStatus(m_updateAvailable ? QStringLiteral("Update available") : QStringLiteral("Up to date"));
+    }
     if (m_updateAvailable && m_autoDownload) {
         downloadUpdate();
     }
@@ -704,6 +952,133 @@ QString UpdateClient::sidecarAssetUrl(const QJsonArray& assets, const QString& b
     return QString();
 }
 
+QString UpdateClient::namedAssetUrl(const QJsonArray& assets, const QStringList& candidateNames) const
+{
+    if (candidateNames.isEmpty()) return QString();
+
+    QStringList loweredNames;
+    loweredNames.reserve(candidateNames.size());
+    for (const QString& candidate : candidateNames) {
+        const QString lowered = candidate.trimmed().toLower();
+        if (!lowered.isEmpty()) loweredNames.push_back(lowered);
+    }
+    if (loweredNames.isEmpty()) return QString();
+
+    for (const QJsonValue& v : assets) {
+        if (!v.isObject()) continue;
+        const QJsonObject obj = v.toObject();
+        QString name = obj.value(QStringLiteral("name")).toString();
+        QString url = obj.value(QStringLiteral("browser_download_url")).toString();
+        if (url.isEmpty()) url = obj.value(QStringLiteral("url")).toString();
+        if (url.isEmpty()) url = obj.value(QStringLiteral("downloadUrl")).toString();
+        if (url.isEmpty()) url = obj.value(QStringLiteral("href")).toString();
+        if (name.isEmpty() && !url.isEmpty()) {
+            name = utils::fileNameFromUrl(QUrl(url));
+        }
+        const QString lowerName = name.trimmed().toLower();
+        if (!lowerName.isEmpty() && loweredNames.contains(lowerName) && !url.isEmpty()) {
+            return url;
+        }
+    }
+    return QString();
+}
+
+QString UpdateClient::fetchRemoteText(const QString& url, QString* errorOut)
+{
+    return QString::fromUtf8(fetchRemoteBytes(url, errorOut));
+}
+
+QByteArray UpdateClient::fetchRemoteBytes(const QString& url, QString* errorOut)
+{
+    const QString trimmedUrl = url.trimmed();
+    if (trimmedUrl.isEmpty()) {
+        if (errorOut) *errorOut = QStringLiteral("Remote URL is empty");
+        return {};
+    }
+
+    QNetworkRequest req{QUrl(trimmedUrl)};
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    req.setTransferTimeout(15000);
+    req.setRawHeader("User-Agent", "raad/1.0");
+    QNetworkReply* reply = m_net.get(req);
+
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+    timeout.start(15000);
+    loop.exec();
+
+    if (!timeout.isActive() && reply && !reply->isFinished()) {
+        reply->abort();
+        if (errorOut) *errorOut = QStringLiteral("Remote request timed out");
+        reply->deleteLater();
+        return {};
+    }
+
+    if (!reply) {
+        if (errorOut) *errorOut = QStringLiteral("Remote request failed");
+        return {};
+    }
+
+    const bool ok = (reply->error() == QNetworkReply::NoError);
+    const QString err = reply->errorString();
+    const QByteArray data = reply->readAll();
+    reply->deleteLater();
+    if (!ok) {
+        if (errorOut) *errorOut = err.isEmpty() ? QStringLiteral("Remote request failed") : err;
+        return {};
+    }
+    return data;
+}
+
+QString UpdateClient::resolveExpectedSha256(const QJsonArray& assets, const QJsonObject& assetObj, const QString& assetUrl)
+{
+    QString expectedSha = assetObj.value(QStringLiteral("sha256")).toString().trimmed();
+    if (expectedSha.isEmpty()) expectedSha = assetObj.value(QStringLiteral("checksum")).toString().trimmed();
+    if (expectedSha.isEmpty()) expectedSha = assetObj.value(QStringLiteral("hash")).toString().trimmed();
+    if (expectedSha.isEmpty()) expectedSha = assetObj.value(QStringLiteral("digest")).toString().trimmed();
+    expectedSha = utils::normalizeChecksum(expectedSha);
+    if (utils::detectChecksumAlgo(expectedSha) == QStringLiteral("SHA256")) {
+        return expectedSha;
+    }
+
+    const QString baseName = !assetObj.value(QStringLiteral("name")).toString().isEmpty()
+        ? assetObj.value(QStringLiteral("name")).toString()
+        : utils::fileNameFromUrl(QUrl(assetUrl));
+    if (baseName.isEmpty()) return QString();
+
+    QString checksumUrl = assetObj.value(QStringLiteral("sha256Url")).toString().trimmed();
+    if (checksumUrl.isEmpty()) checksumUrl = assetObj.value(QStringLiteral("checksumUrl")).toString().trimmed();
+    if (checksumUrl.isEmpty()) checksumUrl = assetObj.value(QStringLiteral("digestUrl")).toString().trimmed();
+    if (checksumUrl.isEmpty()) checksumUrl = sidecarAssetUrl(assets,
+                                                             baseName,
+                                                             {QStringLiteral(".sha256"),
+                                                              QStringLiteral(".sha256sum"),
+                                                              QStringLiteral(".sha256.txt")});
+    if (checksumUrl.isEmpty()) {
+        checksumUrl = namedAssetUrl(assets,
+                                    {QStringLiteral("sha256sums"),
+                                     QStringLiteral("sha256sums.txt"),
+                                     QStringLiteral("checksums.txt"),
+                                     QStringLiteral("checksums.sha256")});
+    }
+    if (checksumUrl.isEmpty()) return QString();
+
+    QString fetchError;
+    const QString checksumText = fetchRemoteText(checksumUrl, &fetchError);
+    if (checksumText.isEmpty()) return QString();
+
+    const QString resolved = utils::extractChecksumFromText(checksumText,
+                                                            QFileInfo(baseName).fileName(),
+                                                            QStringLiteral("SHA256"));
+    if (utils::detectChecksumAlgo(resolved) == QStringLiteral("SHA256")) {
+        return resolved;
+    }
+    return QString();
+}
+
 QString UpdateClient::sha256ForFile(const QString& path) const
 {
     QFile file(path);
@@ -787,23 +1162,14 @@ bool UpdateClient::verifyDownloadedPayload(const QString& payloadPath, QString* 
             return false;
         }
 
-        QNetworkRequest sigReq{QUrl(m_signatureUrl)};
-        sigReq.setRawHeader("User-Agent", "raad/1.0");
-        QNetworkReply* sigReply = m_net.get(sigReq);
-        QEventLoop loop;
-        connect(sigReply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-        loop.exec();
-
-        if (!sigReply || sigReply->error() != QNetworkReply::NoError) {
-            if (errorOut) *errorOut = QStringLiteral("Failed to fetch signature file");
-            if (sigReply) sigReply->deleteLater();
-            return false;
-        }
-
-        const QByteArray sigData = sigReply->readAll();
-        sigReply->deleteLater();
+        QString fetchError;
+        const QByteArray sigData = fetchRemoteBytes(m_signatureUrl, &fetchError);
         if (sigData.isEmpty()) {
-            if (errorOut) *errorOut = QStringLiteral("Signature file is empty");
+            if (errorOut) {
+                *errorOut = fetchError.isEmpty()
+                    ? QStringLiteral("Signature file is empty")
+                    : fetchError;
+            }
             return false;
         }
 

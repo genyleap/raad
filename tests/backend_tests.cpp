@@ -14,6 +14,8 @@ private slots:
     void compareVersions_data();
     void compareVersions();
     void detectChecksumAlgo();
+    void normalizeChecksum();
+    void extractChecksumFromText();
     void normalizeHost();
     void detectCategory();
 };
@@ -44,6 +46,42 @@ void BackendTests::detectChecksumAlgo()
     QCOMPARE(utils::detectChecksumAlgo(QStringLiteral("e3b0c44298fc1c149afbf4c8996fb924"
                                                       "27ae41e4649b934ca495991b7852b855")),
              QStringLiteral("SHA256"));
+}
+
+void BackendTests::normalizeChecksum()
+{
+    QCOMPARE(utils::normalizeChecksum(QStringLiteral("sha256:e3b0c44298fc1c149afbf4c8996fb924"
+                                                     "27ae41e4649b934ca495991b7852b855")),
+             QStringLiteral("e3b0c44298fc1c149afbf4c8996fb924"
+                            "27ae41e4649b934ca495991b7852b855"));
+    QCOMPARE(utils::normalizeChecksum(QStringLiteral("SHA256(example.zip)= e3b0c44298fc1c149afbf4c8996fb924"
+                                                     "27ae41e4649b934ca495991b7852b855")),
+             QStringLiteral("e3b0c44298fc1c149afbf4c8996fb924"
+                            "27ae41e4649b934ca495991b7852b855"));
+    QCOMPARE(utils::normalizeChecksum(QStringLiteral("e3b0c44298fc1c149afbf4c8996fb924"
+                                                     "27ae41e4649b934ca495991b7852b855  example.zip")),
+             QStringLiteral("e3b0c44298fc1c149afbf4c8996fb924"
+                            "27ae41e4649b934ca495991b7852b855"));
+}
+
+void BackendTests::extractChecksumFromText()
+{
+    const QString checksum = QStringLiteral("e3b0c44298fc1c149afbf4c8996fb924"
+                                            "27ae41e4649b934ca495991b7852b855");
+    const QString text = QStringLiteral(
+        "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe  other.pkg\n"
+        "%1  raad-1.0.1-macos.dmg\n"
+        "SHA256(raad-1.0.1-windows.exe)= 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n")
+                             .arg(checksum);
+
+    QCOMPARE(utils::extractChecksumFromText(text,
+                                            QStringLiteral("raad-1.0.1-macos.dmg"),
+                                            QStringLiteral("SHA256")),
+             checksum);
+    QCOMPARE(utils::extractChecksumFromText(QStringLiteral("sha256:%1").arg(checksum),
+                                            QString(),
+                                            QStringLiteral("SHA256")),
+             checksum);
 }
 
 void BackendTests::normalizeHost()

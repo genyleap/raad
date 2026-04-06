@@ -12,6 +12,36 @@ module raad.utils.download_utils;
 
 namespace raad::utils {
 
+static int checksumLengthForAlgo(const QString& algo)
+{
+    const QString upper = algo.trimmed().toUpper();
+    if (upper == QStringLiteral("MD5")) return 32;
+    if (upper == QStringLiteral("SHA1")) return 40;
+    if (upper == QStringLiteral("SHA256")) return 64;
+    if (upper == QStringLiteral("SHA512")) return 128;
+    return 0;
+}
+
+static QString extractChecksumCandidate(const QString& value, int preferredLength = 0)
+{
+    const QString trimmed = value.trimmed().toLower();
+    if (trimmed.isEmpty()) return QString();
+
+    const QList<int> lengths = preferredLength > 0
+        ? QList<int>{preferredLength, 128, 64, 40, 32}
+        : QList<int>{128, 64, 40, 32};
+
+    for (const int length : lengths) {
+        if (length <= 0) continue;
+        const QRegularExpression re(QStringLiteral("(^|[^0-9a-f])([0-9a-f]{%1})(?=$|[^0-9a-f])").arg(length));
+        const QRegularExpressionMatch match = re.match(trimmed);
+        if (match.hasMatch()) {
+            return match.captured(2);
+        }
+    }
+    return QString();
+}
+
 QString normalizeFilePath(const QString& path)
 {
     if (path.startsWith("file://")) {
@@ -142,8 +172,24 @@ bool looksLikeGuidName(const QString& name)
 
 QString normalizeChecksum(const QString& value)
 {
+    const QString extracted = extractChecksumCandidate(value);
+    if (!extracted.isEmpty()) return extracted;
+
     QString out = value.trimmed().toLower();
-    out.remove(' ');
+    out.remove(QRegularExpression(QStringLiteral("\\s+")));
+
+    static const QStringList prefixes{
+        QStringLiteral("md5:"),
+        QStringLiteral("sha1:"),
+        QStringLiteral("sha256:"),
+        QStringLiteral("sha512:")
+    };
+    for (const QString& prefix : prefixes) {
+        if (out.startsWith(prefix)) {
+            out = out.mid(prefix.size());
+            break;
+        }
+    }
     return out;
 }
 
@@ -156,6 +202,37 @@ QString detectChecksumAlgo(const QString& expected)
     if (len == 64) return QStringLiteral("SHA256");
     if (len == 128) return QStringLiteral("SHA512");
     return QString();
+}
+
+QString extractChecksumFromText(const QString& text, const QString& fileName, const QString& preferredAlgo)
+{
+    const QString normalizedFileName = QFileInfo(fileName.trimmed()).fileName().toLower();
+    const int preferredLength = checksumLengthForAlgo(preferredAlgo);
+    const QStringList lines = text.split(QRegularExpression(QStringLiteral("[\\r\\n]+")), Qt::SkipEmptyParts);
+
+    QString fallback;
+    for (const QString& rawLine : lines) {
+        const QString line = rawLine.trimmed();
+        if (line.isEmpty()) continue;
+
+        const QString candidate = extractChecksumCandidate(line, preferredLength);
+        if (candidate.isEmpty()) continue;
+
+        if (normalizedFileName.isEmpty()) {
+            return candidate;
+        }
+
+        const QString lowerLine = line.toLower();
+        if (lowerLine.contains(normalizedFileName)) {
+            return candidate;
+        }
+        if (fallback.isEmpty()) {
+            fallback = candidate;
+        }
+    }
+
+    if (!fallback.isEmpty()) return fallback;
+    return extractChecksumCandidate(text, preferredLength);
 }
 
 QString uniqueFilePath(const QString& path)

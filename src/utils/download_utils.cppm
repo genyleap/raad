@@ -130,6 +130,26 @@ QString normalizeChecksum(const QString& value);
 QString detectChecksumAlgo(const QString& expected);
 
 /**
+ * @brief Extracts a checksum from checksum file text.
+ *
+ * Supports common formats such as:
+ * - `abcdef...`
+ * - `abcdef...  file.zip`
+ * - `SHA256(file.zip)= abcdef...`
+ * - `sha256:abcdef...`
+ *
+ * When @p fileName is provided, lines mentioning that file are preferred.
+ *
+ * @param text Raw checksum file text.
+ * @param fileName Optional target filename to match.
+ * @param preferredAlgo Optional preferred algorithm (for example "SHA256").
+ * @return Normalized checksum string, or empty if none was found.
+ */
+QString extractChecksumFromText(const QString& text,
+                                const QString& fileName = QString(),
+                                const QString& preferredAlgo = QString());
+
+/**
  * @brief Generates a unique file path if the given path already exists.
  *
  * Appends a numeric suffix to avoid overwriting existing files.

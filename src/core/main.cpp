@@ -6,6 +6,7 @@
 #include <QStandardPaths>
 #include <QDir>
 #include <QFile>
+#include <QIcon>
 #include <QUrl>
 
 import raad.core.downloadmanager;
@@ -21,6 +22,7 @@ int main(int argc, char *argv[])
     QCoreApplication::setOrganizationName(QStringLiteral("Genyleap"));
     QCoreApplication::setApplicationName(QStringLiteral("Raad"));
     QCoreApplication::setApplicationVersion(QStringLiteral(APP_VERSION));
+    app.setWindowIcon(QIcon(QStringLiteral(":/Raad.png")));
     QQuickStyle::setStyle("Basic");
 
     // Create DownloadManager instance

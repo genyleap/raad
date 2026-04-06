@@ -324,6 +324,9 @@ private:
     //!< @brief Save settings to persistent store.
     void saveSettings();
 
+    //!< @brief Consume helper status written by a previous update handoff.
+    void consumePendingUpdateStatus();
+
     //!< @brief Update status message.
     void setStatus(const QString& status);
 
@@ -373,8 +376,20 @@ private:
     //!< @brief Return best matching sidecar asset URL by suffix.
     QString sidecarAssetUrl(const QJsonArray& assets, const QString& baseName, const QStringList& suffixes) const;
 
+    //!< @brief Return asset URL whose name matches one of the provided values.
+    QString namedAssetUrl(const QJsonArray& assets, const QStringList& candidateNames) const;
+
+    //!< @brief Resolve SHA-256 for the selected asset from metadata or sidecar file.
+    QString resolveExpectedSha256(const QJsonArray& assets, const QJsonObject& assetObj, const QString& assetUrl);
+
     //!< @brief Compute SHA-256 hash for a file path.
     QString sha256ForFile(const QString& path) const;
+
+    //!< @brief Fetch a remote text resource synchronously with timeout.
+    QString fetchRemoteText(const QString& url, QString* errorOut);
+
+    //!< @brief Fetch remote bytes synchronously with timeout.
+    QByteArray fetchRemoteBytes(const QString& url, QString* errorOut);
 
     //!< @brief Verify detached signature using OpenSSL.
     bool verifySignatureWithOpenSsl(const QString& payloadPath,
