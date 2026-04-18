@@ -37,6 +37,10 @@ module;
 #if defined(Q_OS_MACOS)
 #include <mach/mach.h>
 #include <sys/resource.h>
+#elif defined(Q_OS_WIN)
+#define NOMINMAX
+#include <windows.h>
+#include <psapi.h>
 #elif defined(Q_OS_LINUX)
 #include <sys/resource.h>
 #endif
@@ -103,6 +107,20 @@ qint64 currentProcessCpuTimeNs()
             + static_cast<qint64>(usage.ru_stime.tv_usec) * 1000LL;
         return userNs + sysNs;
     }
+#elif defined(Q_OS_WIN)
+    FILETIME creationTime;
+    FILETIME exitTime;
+    FILETIME kernelTime;
+    FILETIME userTime;
+    if (GetProcessTimes(GetCurrentProcess(), &creationTime, &exitTime, &kernelTime, &userTime)) {
+        ULARGE_INTEGER kernelValue;
+        kernelValue.LowPart = kernelTime.dwLowDateTime;
+        kernelValue.HighPart = kernelTime.dwHighDateTime;
+        ULARGE_INTEGER userValue;
+        userValue.LowPart = userTime.dwLowDateTime;
+        userValue.HighPart = userTime.dwHighDateTime;
+        return static_cast<qint64>((kernelValue.QuadPart + userValue.QuadPart) * 100ULL);
+    }
 #endif
     return 0;
 }
@@ -131,6 +149,15 @@ qint64 currentProcessResidentBytes()
                 break;
             }
         }
+    }
+    return 0;
+#elif defined(Q_OS_WIN)
+    PROCESS_MEMORY_COUNTERS_EX counters{};
+    counters.cb = sizeof(counters);
+    if (GetProcessMemoryInfo(GetCurrentProcess(),
+                             reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),
+                             sizeof(counters))) {
+        return static_cast<qint64>(counters.WorkingSetSize);
     }
     return 0;
 #else
