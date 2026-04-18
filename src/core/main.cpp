@@ -2,6 +2,9 @@
 #include <QCoreApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QOperatingSystemVersion>
+#include <QQuickWindow>
+#include <QSGRendererInterface>
 #include <QQuickStyle>
 #include <QStandardPaths>
 #include <QDir>
@@ -24,6 +27,14 @@ int main(int argc, char *argv[])
     QCoreApplication::setApplicationVersion(QStringLiteral(APP_VERSION));
     app.setWindowIcon(QIcon(QStringLiteral(":/Raad.png")));
     QQuickStyle::setStyle("Basic");
+
+#if defined(Q_OS_WIN)
+    const QOperatingSystemVersion osVersion = QOperatingSystemVersion::current();
+    const auto graphicsApi = osVersion >= QOperatingSystemVersion::Windows11
+        ? QSGRendererInterface::Direct3D12
+        : QSGRendererInterface::Direct3D11;
+    QQuickWindow::setGraphicsApi(graphicsApi);
+#endif
 
     // Create DownloadManager instance
     DownloadManager manager;
