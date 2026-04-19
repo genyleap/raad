@@ -19,7 +19,69 @@ import raad.services.update_client;
 #define APP_VERSION "0.1.0"
 #endif
 
-int main(int argc, char *argv[])
+
+[[nodiscard]] constexpr auto preferredGraphicsApi() noexcept
+    -> QSGRendererInterface::GraphicsApi
+{
+#if defined(Q_OS_WIN)
+    /*
+        Windows policy:
+
+        - Qt Quick on Windows still uses Direct3D 11 as the default backend.
+        - Direct3D 12 is supported too, but only since Qt 6.6.
+        - We intentionally enable D3D12 only on Windows 11+ as a conservative
+          project policy, not because Windows 10 cannot support it.
+        - This keeps Windows 10 on the broader, safer default path, while
+          allowing newer Windows systems to use the newer backend.
+
+        If you want a more aggressive policy later, you can switch this branch
+        to always prefer Direct3D12 on Qt 6.6+.
+    */
+
+#  if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+    return QOperatingSystemVersion::current() >= QOperatingSystemVersion::Windows11
+               ? QSGRendererInterface::Direct3D12
+               : QSGRendererInterface::Direct3D11;
+#  else
+    return QSGRendererInterface::Direct3D11;
+#  endif
+
+#elif defined(Q_OS_MACOS)
+    /*
+        macOS policy:
+
+        - Use Metal on both Intel Macs and Apple Silicon Macs.
+        - This is the native modern graphics backend on macOS.
+    */
+    return QSGRendererInterface::Metal;
+
+#elif defined(Q_OS_LINUX)
+    /*
+        Linux policy:
+
+        - Prefer OpenGL for the widest desktop compatibility across drivers,
+          distributions, X11/Wayland environments, and packaged deployments.
+        - Vulkan can be excellent too, but it is better as an explicit opt-in
+          when the target environment is known and controlled.
+    */
+    return QSGRendererInterface::OpenGL;
+
+#else
+    /*
+        Fallback policy:
+
+        - Let Qt choose its platform default on unsupported or unhandled targets.
+    */
+    return QSGRendererInterface::Unknown;
+#endif
+}
+
+inline void configureGraphicsBackend()
+{
+    QQuickWindow::setGraphicsApi(preferredGraphicsApi());
+}
+
+auto main(int argc, char *argv[]) -> int
 {
     QGuiApplication app(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("Genyleap"));
@@ -28,13 +90,7 @@ int main(int argc, char *argv[])
     app.setWindowIcon(QIcon(QStringLiteral(":/Raad.png")));
     QQuickStyle::setStyle("Basic");
 
-#if defined(Q_OS_WIN)
-    const QOperatingSystemVersion osVersion = QOperatingSystemVersion::current();
-    const auto graphicsApi = osVersion >= QOperatingSystemVersion::Windows11
-        ? QSGRendererInterface::Direct3D12
-        : QSGRendererInterface::Direct3D11;
-    QQuickWindow::setGraphicsApi(graphicsApi);
-#endif
+    ::configureGraphicsBackend();
 
     // Create DownloadManager instance
     DownloadManager manager;
