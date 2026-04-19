@@ -591,18 +591,29 @@ Dialog {
         }
     }
 
-    contentItem: Item {
-        implicitHeight: Math.min(contentColumn.implicitHeight, control.contentViewportHeight)
+    contentItem: Flickable {
+        id: contentFlick
+        implicitHeight: Math.min(contentColumn.implicitHeight + Metrics.padding * 1.5,
+                                 control.contentViewportHeight)
         implicitWidth: contentColumn.implicitWidth
-        height: Math.min(contentColumn.implicitHeight, control.contentViewportHeight)
+        height: Math.min(contentColumn.implicitHeight + Metrics.padding * 1.5,
+                         control.contentViewportHeight)
+        contentWidth: width
+        contentHeight: contentColumn.implicitHeight + Metrics.padding * 1.5
         clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+        interactive: contentHeight > height
+
+        ScrollBar.vertical: ScrollBar {
+            policy: contentFlick.contentHeight > contentFlick.height ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+        }
 
         ColumnLayout {
             id: contentColumn
-            anchors.fill: parent
-            anchors.leftMargin: control.dialogPadding
-            anchors.rightMargin: control.dialogPadding
-            anchors.topMargin: Metrics.padding * 1.5
+            width: Math.max(contentFlick.width - control.dialogPadding * 2, 0)
+            x: control.dialogPadding
+            y: Metrics.padding * 1.5
             spacing: control.contentSpacing
 
             Text {
@@ -610,6 +621,7 @@ Dialog {
                 text: control.desc
                 font.bold: true
                 Layout.fillWidth: true
+                wrapMode: Text.WordWrap
             }
 
             Text {
@@ -626,12 +638,11 @@ Dialog {
             ColumnLayout {
                 id: bodyContainer
                 Layout.fillWidth: true
-                Layout.fillHeight: true
                 spacing: control.contentSpacing
             }
 
             Item {
-                visible: !control.hasFooter
+                Layout.fillWidth: true
                 Layout.preferredHeight: Metrics.padding
             }
         }
